@@ -14,7 +14,7 @@ st.set_page_config(page_title="Global Implicit Tafel Fit", layout="wide")
 F = 96485.33212
 R = 8.314462618
 
-st.title("Global Implicit Tafel Fit (Single-Stage)")
+st.title("Global Implicit Tafel Fit")
 
 def beta_from_alpha(alpha, n=1, T=298.15):
     return 2.303 * R * T / (max(alpha, 1e-6) * n * F)
@@ -216,7 +216,7 @@ if data_file is not None:
     fig, ax = plt.subplots()
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
-    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Data-driven Ecorr")
+    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr")
     ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
     ax.set_xlabel("Potential (V)")
     ax.set_ylabel("|i| (A/cm²)")
