@@ -9,7 +9,7 @@ from scipy.optimize import least_squares
 from scipy.interpolate import UnivariateSpline
 from sklearn.metrics import r2_score
 
-st.set_page_config(page_title="Global Implicit Tafel Fit (Safe Fast Two-Stage)", layout="wide")
+st.set_page_config(page_title="Global Implicit Tafel Fit", layout="wide")
 
 F = 96485.33212
 R = 8.314462618
@@ -169,16 +169,15 @@ if data_file is not None:
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas)+1e-12), s=0.001)
     i_smooth = 10**spl(E_grid)
-    r2_cosmetic = r2_score(np.log10(np.abs(i_meas)+1e-12), spl(E))
-    st.write(f"Cosmetic overlay R² ≈ {r2_cosmetic:.3f}")
+    r2 = r2_score(np.log10(np.abs(i_meas)+1e-12), spl(E))
 
     # ---- Plot ----
     fig, ax = plt.subplots()
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
-    ax.semilogy(E_grid, i_smooth, "r-", label="Cosmetic Fit")
-    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Data-driven Ecorr")
-    ax.axvline(xA[5], color="orange", linestyle="--", label="Stage A Ecorr")
-    ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Stage B Ecorr")
+    ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
+    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr")
+    ax.axvline(xA[5], color="orange", linestyle="--", label="Fitted Ecorr")
+    ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
     ax.set_xlabel("Potential (V)"); ax.set_ylabel("|i| (A)")
     ax.grid(True, which="both"); ax.legend()
     st.pyplot(fig)
