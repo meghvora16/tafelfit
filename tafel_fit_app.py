@@ -88,6 +88,19 @@ if data_file is not None:
     area_val = st.number_input("Electrode area (cm²)", value=1.0)
     area_arr = np.full(len(df), area_val)
 
+    # Corrosion rate inputs
+    st.markdown("### Corrosion rate inputs")
+    ew_mode = st.radio("Provide:", ["Equivalent weight (g/eq)", "Atomic weight + valence"], index=0, horizontal=True)
+    if ew_mode == "Equivalent weight (g/eq)":
+        EW = st.number_input("Equivalent weight, EW (g/equiv)", value=27.92, min_value=0.0, help="For Fe (valence 2), EW ≈ 27.92 g/eq")
+    else:
+        M = st.number_input("Atomic weight, M (g/mol)", value=55.845, min_value=0.0)
+        z = st.number_input("Valence (electrons per atom)", value=2, min_value=1, step=1)
+        EW = M / max(z, 1)
+
+    rho = st.number_input("Density, ρ (g/cm³)", value=7.87, min_value=0.0)
+
+    # Data prep
     E_raw = df[col_E].astype(float).to_numpy()
     if pot_units == "mV": E_raw /= 1000
     I_raw = df[col_I].astype(float).to_numpy()
@@ -152,10 +165,21 @@ if data_file is not None:
 
     beta_a = beta_from_alpha(pars["alpha_a"])
     beta_c = beta_from_alpha(pars["alpha_c"])
-    i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))
+
+    # i_corr here is taken as |i| at E = Ecorr from the implicit model
+    i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))  # A/cm²
+
+    # Corrosion rate in mm/year:
+    # CR(mm/yr) = 3270 * i_corr(A/cm²) * EW(g/eq) / rho(g/cm³)
+    if np.isfinite(i_corr) and rho > 0 and EW > 0:
+        CR_mm_per_yr = 3270.0 * i_corr * EW / rho
+    else:
+        CR_mm_per_yr = np.nan
+
     st.write(f"β_a = {beta_a:.3f} V/dec, β_c = {beta_c:.3f} V/dec")
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
+    st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (EW = {EW:.3f} g/eq, ρ = {rho:.3f} g/cm³)")
 
     # ---- Cosmetic curve ----
     E_grid = np.linspace(E.min(), E.max(), 600)
