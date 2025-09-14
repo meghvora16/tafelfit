@@ -78,7 +78,8 @@ def downsample(E, I, n_points=100):
 data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv","xlsx","xls"])
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
-    st.success(f"Loaded {len(df)} rows."); st.dataframe(df.head(8))
+    st.success(f"Loaded {len(df)} rows.")
+    st.dataframe(df.head(8))
 
     col_E = st.selectbox("Potential column", df.columns)
     col_I = st.selectbox("Current column", df.columns)
@@ -87,18 +88,6 @@ if data_file is not None:
 
     area_val = st.number_input("Electrode area (cm²)", value=1.0)
     area_arr = np.full(len(df), area_val)
-
-    # Corrosion rate inputs
-    st.markdown("### Corrosion rate inputs")
-    ew_mode = st.radio("Provide:", ["Equivalent weight (g/eq)", "Atomic weight + valence"], index=0, horizontal=True)
-    if ew_mode == "Equivalent weight (g/eq)":
-        EW = st.number_input("Equivalent weight, EW (g/equiv)", value=27.92, min_value=0.0, help="For Fe (valence 2), EW ≈ 27.92 g/eq")
-    else:
-        M = st.number_input("Atomic weight, M (g/mol)", value=55.845, min_value=0.0)
-        z = st.number_input("Valence (electrons per atom)", value=2, min_value=1, step=1)
-        EW = M / max(z, 1)
-
-    rho = st.number_input("Density, ρ (g/cm³)", value=7.87, min_value=0.0)
 
     # Data prep
     E_raw = df[col_E].astype(float).to_numpy()
@@ -169,17 +158,53 @@ if data_file is not None:
     # i_corr here is taken as |i| at E = Ecorr from the implicit model
     i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))  # A/cm²
 
-    # Corrosion rate in mm/year:
-    # CR(mm/yr) = 3270 * i_corr(A/cm²) * EW(g/eq) / rho(g/cm³)
-    if np.isfinite(i_corr) and rho > 0 and EW > 0:
-        CR_mm_per_yr = 3270.0 * i_corr * EW / rho
-    else:
-        CR_mm_per_yr = np.nan
-
     st.write(f"β_a = {beta_a:.3f} V/dec, β_c = {beta_c:.3f} V/dec")
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
-    st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (EW = {EW:.3f} g/eq, ρ = {rho:.3f} g/cm³)")
+
+    # ---- Corrosion rate (no EW or density) ----
+    st.markdown("### Corrosion rate")
+    mode = st.radio("Material info:", ["I know V_m and z", "I don't know the material"], index=1, horizontal=True)
+
+    if mode == "I know V_m and z":
+        z = st.number_input("Valence z (electrons per metal atom)", value=2, min_value=1, step=1)
+        Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0,
+                             help="Examples: Fe≈7.09, Al≈10.0, Cu≈7.11, Ni≈6.59, Zn≈9.16, Ti≈10.64, Mg≈14.0 cm³/mol")
+        # CR(mm/yr) = 3270 * i_corr(A/cm²) * V_m(cm³/mol) / z
+        if np.isfinite(i_corr) and Vm > 0 and z > 0:
+            CR_mm_per_yr = 3270.0 * i_corr * Vm / z
+            st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
+        else:
+            st.warning("Provide positive V_m and z to compute corrosion rate.")
+    else:
+        # Unknown material: estimate best value and range across common metals
+        materials = {
+            "Steel-like (Fe)": (7.09, 2),
+            "Aluminum (Al)":   (10.0, 3),
+            "Copper (Cu)":     (7.11, 2),
+            "Nickel (Ni)":     (6.59, 2),
+            "Zinc (Zn)":       (9.16, 2),
+            "Titanium (Ti)":   (10.64, 4),
+            "Magnesium (Mg)":  (14.0, 2),
+        }
+        # Factor per μA/cm²: k = 3.27e-3 * V_m / z  [mm/year per μA/cm²]
+        k_list = np.array([3.27e-3 * Vm / z for (Vm, z) in materials.values()])
+        k_med = float(np.median(k_list))
+        k_min = float(np.min(k_list))
+        k_max = float(np.max(k_list))
+
+        i_corr_uA = i_corr * 1e6  # A/cm² -> μA/cm²
+        cr_est  = k_med * i_corr_uA
+        cr_low  = k_min * i_corr_uA
+        cr_high = k_max * i_corr_uA
+
+        st.write(f"Estimated corrosion rate = **{cr_est:.3f} mm/year**")
+        st.write(f"Typical range across common metals: **{cr_low:.3f} – {cr_high:.3f} mm/year**")
+        with st.expander("Assumptions and per-μA factors"):
+            for name, (Vm, z) in materials.items():
+                k = 3.27e-3 * Vm / z
+                st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
+        st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
 
     # ---- Cosmetic curve ----
     E_grid = np.linspace(E.min(), E.max(), 600)
@@ -191,7 +216,7 @@ if data_file is not None:
     fig, ax = plt.subplots()
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
-    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr")
+    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Data-driven Ecorr")
     ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
     ax.set_xlabel("Potential (V)")
     ax.set_ylabel("|i| (A/cm²)")
