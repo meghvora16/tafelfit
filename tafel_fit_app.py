@@ -107,29 +107,7 @@ if data_file is not None:
         Ecorr_guess = E[np.argmin(np.abs(i_meas))]
     st.write(f"Data-driven Ecorr ≈ **{Ecorr_guess:.3f} V**")
 
-    # ---- Stage A: local fit ----
-    log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6,0.5,-8,0.5,-4,0
-    x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
-
-    w_half = 0.20
-    maskA = (E >= Ecorr_guess - w_half) & (E <= Ecorr_guess + w_half)
-    E_A, i_A = downsample(E[maskA], i_meas[maskA], 80)
-
-    bounds_lo_A = [-12,0.3,-12,0.3,-6,Ecorr_guess-0.2,0]
-    bounds_hi_A = [-2, 0.7,-3, 0.7,-3,Ecorr_guess+0.2,200]
-
-    def residuals_A(x):
-        pars = {"i0_a":10**x[0],"alpha_a":x[1],"i0_c":10**x[2],"alpha_c":x[3],
-                "iL":10**x[4],"Ecorr":x[5],"Ru":max(x[6],0)}
-        i_model = simulate_curve(E_A, pars)
-        mask = np.isfinite(i_model)
-        return (i_model[mask] - i_A[mask])
-
-    resA = least_squares(residuals_A, x0, bounds=(bounds_lo_A, bounds_hi_A),
-                         loss="soft_l1", f_scale=0.5, max_nfev=500)
-    xA = resA.x
-
-    # ---- Stage B: global fit ----
+    # ---- Global fit ----
     maskB = (E >= Ecorr_guess - 0.3) & (E <= Ecorr_guess + 0.3)
     E_B, i_B = downsample(E[maskB], i_meas[maskB], 120)
 
@@ -176,7 +154,6 @@ if data_file is not None:
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr")
-    ax.axvline(xA[5], color="orange", linestyle="--", label="Fitted Ecorr")
     ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
     ax.set_xlabel("Potential (V)"); ax.set_ylabel("|i| (A)")
     ax.grid(True, which="both"); ax.legend()
