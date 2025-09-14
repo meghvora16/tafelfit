@@ -206,6 +206,48 @@ if data_file is not None:
                 st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
         st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
 
+    # ---- Methods and equations (added for documentation only; outputs unchanged) ----
+    with st.expander("Methods and equations used"):
+        st.markdown(r"""
+**Model**
+- Overpotential with ohmic drop: \( \eta = E - E_{\text{corr}} - i\,R_u \)
+- Anodic activation: \( i_a = i_{0,a}\,\exp\!\big(\tfrac{\alpha_a n F}{RT}\,\eta\big) \)
+- Cathodic activation: \( i_{c}^{\text{act}} = -\,i_{0,c}\,\exp\!\big(-\tfrac{\alpha_c n F}{RT}\,\eta\big) \)
+- Cathodic mass-transfer limit (Koutecký–Levich combination):
+  \[
+  \frac{1}{i_c}=\frac{1}{i_{c}^{\text{act}}}+\frac{1}{-i_L}
+  \quad\Rightarrow\quad
+  i_c=\frac{i_{c}^{\text{act}}(-i_L)}{\,i_{c}^{\text{act}}-i_L\,}
+  \]
+- Mixed current balance (implicit): \( i = i_a + i_c \), solved for \(i\) by Newton's method at each \(E\).
+
+**Fitting objective**
+- For each point \(E_j\), compute \(i_{\text{model}}(E_j)\) and minimize robust log-magnitude residuals:
+  \[
+  r_j=\log_{10}\!\big(|i_{\text{model}}|+\varepsilon\big)-\log_{10}\!\big(|i_{\text{meas}}|+\varepsilon\big)
+  \]
+  using `soft_l1` loss with bounds on parameters.
+
+**Reported quantities**
+- Tafel slope: \( \beta = \tfrac{2.303\,RT}{\alpha\,nF} \) (V/dec)
+- Corrosion current density: \( i_{\text{corr}} = |\,i(E=E_{\text{corr}})\,| \)
+- Corrosion rate (if \(V_m,z\) known): \( \text{CR}(\text{mm/yr}) = 3270 \; i_{\text{corr}}(\text{A/cm}^2)\; \tfrac{V_m(\text{cm}^3/\text{mol})}{z} \)
+
+**Notes on sources**
+- This is a generic mixed-kinetics model (Butler–Volmer branches + Koutecký–Levich limit + ohmic drop), consistent with textbook electrochemistry and many papers.
+- It is conceptually aligned with:
+  - M. C. van Ede & U. Angst — Tafel slopes and exchange current densities for ORR/HER on steel.
+  - H. J. Flitt & D. P. Schweinsberg — Polarisation curve deconstruction for Fe/H\(_2\)O/H\(^+\)/O\(_2\).
+- The implementation here is not a direct reproduction of those specific methodologies; it uses a single anodic and a single lumped cathodic branch with one limiting current.
+""")
+
+    with st.expander("References"):
+        st.markdown("""
+- M. C. van Ede and U. Angst, “Tafel slopes and exchange current densities of oxygen reduction and hydrogen evolution on steel.” (DOI provided in your source)
+- H. J. Flitt and D. P. Schweinsberg, “A guide to polarisation curve interpretation: deconstruction of experimental curves typical of the Fe/H2O/H+/O2 corrosion system.”
+- Standard texts on electrochemistry and corrosion kinetics (e.g., Butler–Volmer, Koutecký–Levich, mixed potential theory).
+""")
+
     # ---- Cosmetic curve ----
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
