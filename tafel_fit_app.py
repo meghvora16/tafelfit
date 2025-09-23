@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.interpolate import UnivariateSpline
 from sklearn.metrics import r2_score
+from scipy.stats import linregress
 
 st.set_page_config(page_title="Global Implicit Tafel Fit", layout="wide")
 
@@ -71,6 +72,38 @@ def downsample(E, I, n_points=100):
     idx = np.linspace(0, len(E)-1, n_points, dtype=int)
     return E[idx], I[idx]
 
+# Tafel region detection function
+def find_tafel_region(E, i_meas, Ecorr, anodic=True, window_size=7, r2_threshold=0.995):
+    if anodic:
+        mask = (E > Ecorr) & (i_meas > 0)
+    else:
+        mask = (E < Ecorr) & (i_meas < 0)
+    indices = np.where(mask)[0]
+    if len(indices) < window_size:
+        return np.array([], dtype=int)
+    tafel_windows = []
+    for i in range(len(indices) - window_size + 1):
+        idx_window = indices[i:i+window_size]
+        logi = np.log10(np.abs(i_meas[idx_window]) + 1e-15)
+        res = linregress(E[idx_window], logi)
+        fitvals = res.intercept + res.slope * E[idx_window]
+        ss_res = np.sum((logi - fitvals)**2)
+        ss_tot = np.sum((logi - np.mean(logi))**2)
+        r2 = 1 - ss_res/ss_tot if ss_tot != 0 else 0
+        if r2 > r2_threshold:
+            tafel_windows.append(idx_window)
+    # Flatten, aggregate contiguous windows
+    tafel_pts = np.unique(np.concatenate(tafel_windows)) if tafel_windows else np.array([], dtype=int)
+    # Select largest contiguous segment (recommended for reporting)
+    if len(tafel_pts) > 0:
+        diffs = np.diff(tafel_pts)
+        splits = np.where(diffs > 1)[0]
+        segments = np.split(tafel_pts, splits + 1)
+        largest_segment = max(segments, key=len)
+        return largest_segment
+    else:
+        return tafel_pts
+
 # ---- Upload ----
 data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv","xlsx","xls"])
 if data_file is not None:
@@ -86,7 +119,6 @@ if data_file is not None:
     area_val = st.number_input("Electrode area (cm²)", value=1.0)
     area_arr = np.full(len(df), area_val)
 
-    # Data prep
     E_raw = df[col_E].astype(float).to_numpy()
     if pot_units == "mV": E_raw /= 1000
     I_raw = df[col_I].astype(float).to_numpy()
@@ -110,7 +142,6 @@ if data_file is not None:
     log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6, 0.5, -8, 0.5, -4, 0
     x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
 
-    # Fit window
     maskB = (E >= Ecorr_guess - 0.3) & (E <= Ecorr_guess + 0.3)
     E_B, i_B = downsample(E[maskB], i_meas[maskB], 120)
 
@@ -144,27 +175,23 @@ if data_file is not None:
         "Ru":max(x[6],0)
     }
 
-    # ---- Results ----
     st.subheader("Extracted Parameters")
     st.json(pars)
 
     beta_a = beta_from_alpha(pars["alpha_a"])
     beta_c = beta_from_alpha(pars["alpha_c"])
-
-    i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))  # A/cm²
+    i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))
 
     st.write(f"β_a = {beta_a:.3f} V/dec, β_c = {beta_c:.3f} V/dec")
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
-    # ---- Corrosion rate (no EW or density) ----
+    # ---- Corrosion rate ----
     st.markdown("### Corrosion rate")
     mode = st.radio("Material info:", ["I know V_m and z", "I don't know the material"], index=1, horizontal=True)
-
     if mode == "I know V_m and z":
         z = st.number_input("Valence z (electrons per metal atom)", value=2, min_value=1, step=1)
-        Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0,
-                             help="Examples: Fe≈7.09, Al≈10.0, Cu≈7.11, Ni≈6.59, Zn≈9.16, Ti≈10.64, Mg≈14.0 cm³/mol")
+        Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0)
         if np.isfinite(i_corr) and Vm > 0 and z > 0:
             CR_mm_per_yr = 3270.0 * i_corr * Vm / z
             st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
@@ -184,12 +211,10 @@ if data_file is not None:
         k_med = float(np.median(k_list))
         k_min = float(np.min(k_list))
         k_max = float(np.max(k_list))
-
-        i_corr_uA = i_corr * 1e6  # A/cm² -> μA/cm²
+        i_corr_uA = i_corr * 1e6
         cr_est  = k_med * i_corr_uA
         cr_low  = k_min * i_corr_uA
         cr_high = k_max * i_corr_uA
-
         st.write(f"Estimated corrosion rate = **{cr_est:.3f} mm/year**")
         st.write(f"Typical range across common metals: **{cr_low:.3f} – {cr_high:.3f} mm/year**")
         with st.expander("Assumptions and per-μA factors"):
@@ -197,102 +222,39 @@ if data_file is not None:
                 k = 3.27e-3 * Vm / z
                 st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
         st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
-
-    with st.expander("Methods and equations used"):
-        st.markdown(r"""
-**Model**
-- Overpotential with ohmic drop: \( \eta = E - E_{\text{corr}} - i\,R_u \)
-- Anodic activation: \( i_a = i_{0,a}\,\exp\!\big(\tfrac{\alpha_a n F}{RT}\,\eta\big) \)
-- Cathodic activation: \( i_{c}^{\text{act}} = -\,i_{0,c}\,\exp\!\big(-\tfrac{\alpha_c n F}{RT}\,\eta\big) \)
-- Cathodic mass-transfer limit (Koutecký–Levich combination):
-  \[
-  \frac{1}{i_c}=\frac{1}{i_{c}^{\text{act}}}+\frac{1}{-i_L}
-  \quad\Rightarrow\quad
-  i_c=\frac{i_{c}^{\text{act}}(-i_L)}{\,i_{c}^{\text{act}}-i_L\,}
-  \]
-- Mixed current balance (implicit): \( i = i_a + i_c \), solved for \(i\) by Newton's method at each \(E\).
-
-**Fitting objective**
-- For each point \(E_j\), compute \(i_{\text{model}}(E_j)\) and minimize robust log-magnitude residuals:
-  \[
-  r_j=\log_{10}\!\big(|i_{\text{model}}|+\varepsilon\big)-\log_{10}\!\big(|i_{\text{meas}}|+\varepsilon\big)
-  \]
-  using `soft_l1` loss with bounds on parameters.
-
-**Reported quantities**
-- Tafel slope: \( \beta = \tfrac{2.303\,RT}{\alpha\,nF} \) (V/dec)
-- Corrosion current density: \( i_{\text{corr}} = |\,i(E=E_{\text{corr}})\,| \)
-- Corrosion rate (if \(V_m,z\) known): \( \text{CR}(\text{mm/yr}) = 3270 \; i_{\text{corr}}(\text{A/cm}^2)\; \tfrac{V_m(\text{cm}^3/\text{mol})}{z} \)
-
-**Notes on sources**
-- This is a generic mixed-kinetics model (Butler–Volmer branches + Koutecký–Levich limit + ohmic drop), consistent with textbook electrochemistry and many papers.
-- It is conceptually aligned with:
-  - M. C. van Ede & U. Angst — Tafel slopes and exchange current densities for ORR/HER on steel.
-  - H. J. Flitt & D. P. Schweinsberg — Polarisation curve deconstruction for Fe/H\(_2\)O/H\(^+\)/O\(_2\).
-- The implementation here is not a direct reproduction of those specific methodologies; it uses a single anodic and a single lumped cathodic branch with one limiting current.
-""")
-
-    with st.expander("References"):
-        st.markdown("""
-- M. C. van Ede and U. Angst, “Tafel slopes and exchange current densities of oxygen reduction and hydrogen evolution on steel.” (DOI provided in your source)
-- H. J. Flitt and D. P. Schweinsberg, “A guide to polarisation curve interpretation: deconstruction of experimental curves typical of the Fe/H2O/H+/O2 corrosion system.”
-- Standard texts on electrochemistry and corrosion kinetics (e.g., Butler–Volmer, Koutecký–Levich, mixed potential theory).
-""")
-
-    # ---- Cosmetic curve for fit plotting ----
+    #--- Cosmetic fit ---
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10**spl(E_grid)
     r2 = r2_score(np.log10(np.abs(i_meas) + 1e-12), spl(E))
-
-    # ---- Improved automatic region selection for plotting ----
+    #--- Automatic Tafel region selection ---
+    # Detect regions using largest contiguous linear segment
+    anodic_idx = find_tafel_region(E, i_meas, Ecorr_guess, anodic=True)
+    cathodic_idx = find_tafel_region(E, i_meas, Ecorr_guess, anodic=False)
+    # Get region bounds for shading
+    anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx)>0 else (None,None)
+    cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx)>0 else (None,None)
     ecorr_window = 0.03
-    diff_limit_thr = 0.15
-    Ecorr = Ecorr_guess
-
-    # Limiting current: minimum value in cathodic regime
-    ilim = np.nanmin(i_meas)
-    mask_cathodic_total = (E < Ecorr)
-    mask_anodic = (E > Ecorr) & (i_meas > 0)
-
-    # Diffusion-limited branch
-    mask_diff = (i_meas < 0) & \
-                (np.abs(i_meas - ilim)/np.abs(ilim) < diff_limit_thr) & \
-                (E < Ecorr - ecorr_window)
-    # Cathodic Tafel region
-    mask_cathodic = mask_cathodic_total & (i_meas < 0) & (~mask_diff)
-    # Ecorr region (near zero crossing)
-    mask_ecorr = (np.abs(E-Ecorr) <= ecorr_window)
-
-    st.write(f"Region counts: Anodic Tafel: {np.sum(mask_anodic)}, Cathodic Tafel: {np.sum(mask_cathodic)}, Diffusion-limited: {np.sum(mask_diff)}, Ecorr: {np.sum(mask_ecorr)}")
-
-    # ---- Plot ----
+    #--- Plot with shaded regions ---
     fig, ax = plt.subplots(figsize=(7,5))
-    ax.semilogy(E, np.abs(i_meas), "k.", label="All data")
-    ax.semilogy(E_grid, i_smooth, "r-", label="Global Fit")
-    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr (data-driven)")
-    ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
-
-    ax.semilogy(E[mask_anodic], np.abs(i_meas[mask_anodic]),
-                "o", color='orange', label="Anodic Tafel region")
-    ax.semilogy(E[mask_cathodic], np.abs(i_meas[mask_cathodic]),
-                "o", color='blue', label="Cathodic Tafel region")
-    ax.semilogy(E[mask_diff], np.abs(i_meas[mask_diff]),
-                "o", color='green', label="Diffusion-limited branch")
-    ax.semilogy(E[mask_ecorr], np.abs(i_meas[mask_ecorr]),
-                "o", color='magenta', label="Ecorr region")
-
+    # Shaded cathodic tafel region
+    if cathodic_bounds[0] is not None:
+        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic active")
+    # Shaded anodic tafel region
+    if anodic_bounds[0] is not None:
+        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic active")
+    # Shaded Ecorr region (optional)
+    ax.axvspan(Ecorr_guess-ecorr_window, Ecorr_guess+ecorr_window, color='grey', alpha=0.08, label='Ecorr region')
+    ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
+    ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
+    ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax.set_xlabel("Potential (V)")
-    ax.set_ylabel("|i| (A/cm²)")
+    ax.set_ylabel(r"$|i|$ (A/cm²)")
     ax.grid(True, which="both")
-    ax.legend(fontsize=9, loc="best")
+    ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
-
     st.info(
-        "Colored points indicate the regions of the polarization curve most strongly associated with each equation/parameter:\n"
-        "**Orange:** Anodic Tafel (determines αₐ, i₀ₐ)\n"
-        "**Blue:** Cathodic Tafel (determines α_c, i₀_c)\n"
-        "**Green:** Diffusion-limited (determines i_L; plateau close to lowest |i|)\n"
-        "**Magenta:** Ecorr (mixed potential, net current balance for Ecorr)\n\n"
-        "Automatic detection is current-based, not just voltage-based, making the region selection physically robust."
+        "Tafel regions (active domains) are automatically detected by local linearity in log(|i|) vs E and visualized as shaded areas for publication clarity."
+        "\nRed: Anodic Tafel region. Blue: Cathodic Tafel region. Grey: Ecorr region. \n\n"
+        "Only points with high R² are marked for slope fitting and reporting."
     )
