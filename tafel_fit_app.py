@@ -51,7 +51,7 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
 
         di_a_deta = i_a * k_a
         di_cact_deta = (-i_c_act) * k_c
-        di_c_dg = (iL**2) / (denom**2)
+        di_c_dg = (iL ** 2) / (denom ** 2)
         di_c_deta = di_c_dg * di_cact_deta
         dfi = 1 - (di_a_deta + di_c_deta) * -Ru
 
@@ -82,7 +82,6 @@ def downsample(E, I, n_points=100):
 
 
 def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995):
-    """Find longest contiguous region (at least min_size) with R² above threshold on log(|i|) vs E."""
     if anodic:
         mask = (E > Ecorr) & (i_meas > 0)
     else:
@@ -90,7 +89,6 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     indices = np.where(mask)[0]
     best_len = 0
     best_seg = None
-    # Try all possible contiguous segments
     for start in range(len(indices)):
         for end in range(start + min_size, len(indices) + 1):
             idx_window = indices[start:end]
@@ -240,7 +238,7 @@ if data_file is not None:
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx) > 0 else (None, None)
 
     # Diffusion-limited (green)
-    diff_limit_thr = 0.2
+    diff_limit_thr = 0.20    # <---- Increase to 0.20 or more to include more plateau points
     ilim = np.nanmin(i_meas)
     mask_diff = (i_meas < 0) & (np.abs(i_meas - ilim) / np.abs(ilim) < diff_limit_thr) & (E < Ecorr_guess)
     diff_indices = np.where(mask_diff)[0]
@@ -290,7 +288,18 @@ if data_file is not None:
     ax2.legend(loc="lower right", fontsize=9)
     st.pyplot(fig2)
 
+    # --- Raw Tafel plot: log(|i|) vs E (just data, no overlays) ---
+    fig_raw, ax_raw = plt.subplots(figsize=(7, 5))
+    ax_raw.plot(E, np.log10(np.abs(i_meas) + 1e-15), "ko", ms=4, label="Raw data")
+    ax_raw.set_xlabel("Potential (V)")
+    ax_raw.set_ylabel("log |i| (A/cm²)")
+    ax_raw.grid(True, which="both")
+    ax_raw.legend(loc="best")
+    ax_raw.set_title("Raw Tafel Plot: log(|i|) vs. Potential")
+    st.pyplot(fig_raw)
+
     st.info(
         "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Green=Diffusion-limited, Magenta=Ecorr region.\n"
-        "ONLY the longest contiguous, high-linearity region is used for Tafel slope reporting on each branch (see log(|i|) vs E plot above for the fit window)."
+        "ONLY the longest contiguous, high-linearity region is used for Tafel slope reporting on each branch (see log(|i|) vs E plot above for the fit window).\n"
+        "At the bottom: raw Tafel plot for visual checking of your uploaded data."
     )
