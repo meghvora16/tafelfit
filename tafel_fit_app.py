@@ -1,4 +1,3 @@
-import io
 import json
 import math
 import numpy as np
@@ -19,7 +18,6 @@ st.title("Global Implicit Tafel Fit")
 def beta_from_alpha(alpha, n=1, T=298.15):
     return 2.303 * R * T / (max(alpha, 1e-6) * n * F)
 
-# ---- Physics solver with overflow protection ----
 def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
     try:
         i0_a = pars["i0_a"]; alpha_a = pars["alpha_a"]
@@ -32,11 +30,11 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
     k_a = (alpha_a * n * F) / (R * T)
     k_c = (alpha_c * n * F) / (R * T)
 
-    for _ in range(10):  # 10 Newton steps max
+    for _ in range(10):
         try:
             eta = E - Ecorr - i * Ru
             i_a = i0_a * math.exp(k_a * eta)
-            i_c_act = - i0_c * math.exp(-k_c * eta)
+            i_c_act = -i0_c * math.exp(-k_c * eta)
         except OverflowError:
             return np.nan
 
@@ -52,7 +50,7 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
         dfi = 1 - (di_a_deta + di_c_deta) * -Ru
 
         step = -f / (dfi + 1e-30)
-        i += step * 0.5  # damped step
+        i += step * 0.5
         if abs(f) < 1e-12:
             break
     return i
@@ -67,7 +65,6 @@ def simulate_curve(E_arr, pars, T=298.15, n=1):
         out.append(val)
     return np.array(out)
 
-# ---- Utility: downsample ----
 def downsample(E, I, n_points=100):
     if len(E) <= n_points:
         return E, I
@@ -113,7 +110,7 @@ if data_file is not None:
     log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6, 0.5, -8, 0.5, -4, 0
     x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
 
-    # Fit window (you can widen this if desired)
+    # Fit window
     maskB = (E >= Ecorr_guess - 0.3) & (E <= Ecorr_guess + 0.3)
     E_B, i_B = downsample(E[maskB], i_meas[maskB], 120)
 
@@ -154,7 +151,6 @@ if data_file is not None:
     beta_a = beta_from_alpha(pars["alpha_a"])
     beta_c = beta_from_alpha(pars["alpha_c"])
 
-    # i_corr here is taken as |i| at E = Ecorr from the implicit model
     i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))  # A/cm²
 
     st.write(f"β_a = {beta_a:.3f} V/dec, β_c = {beta_c:.3f} V/dec")
@@ -243,19 +239,32 @@ if data_file is not None:
 - Standard texts on electrochemistry and corrosion kinetics (e.g., Butler–Volmer, Koutecký–Levich, mixed potential theory).
 """)
 
-    # ---- Cosmetic curve ----
+    # ---- Cosmetic curve for fit plotting ----
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10**spl(E_grid)
     r2 = r2_score(np.log10(np.abs(i_meas) + 1e-12), spl(E))
 
-    # ---- Highlight regions: mask arrays ----
-    # Define regions near Ecorr, anodic, cathodic, diffusion limit
-    # You can tweak ±0.03 and ±0.2 for your application
-    mask_anodic = E > Ecorr_guess + 0.03             # Anodic Tafel
-    mask_cathodic = E < Ecorr_guess - 0.03           # Cathodic Tafel
-    mask_ecorr = (E >= Ecorr_guess - 0.03) & (E <= Ecorr_guess + 0.03) # Mixed potential, Ecorr region
-    mask_diff = (E < Ecorr_guess - 0.2)              # Diffusion-limited branch
+    # ---- Improved automatic region selection for plotting ----
+    ecorr_window = 0.03
+    diff_limit_thr = 0.15
+    Ecorr = Ecorr_guess
+
+    # Limiting current: minimum value in cathodic regime
+    ilim = np.nanmin(i_meas)
+    mask_cathodic_total = (E < Ecorr)
+    mask_anodic = (E > Ecorr) & (i_meas > 0)
+
+    # Diffusion-limited branch
+    mask_diff = (i_meas < 0) & \
+                (np.abs(i_meas - ilim)/np.abs(ilim) < diff_limit_thr) & \
+                (E < Ecorr - ecorr_window)
+    # Cathodic Tafel region
+    mask_cathodic = mask_cathodic_total & (i_meas < 0) & (~mask_diff)
+    # Ecorr region (near zero crossing)
+    mask_ecorr = (np.abs(E-Ecorr) <= ecorr_window)
+
+    st.write(f"Region counts: Anodic Tafel: {np.sum(mask_anodic)}, Cathodic Tafel: {np.sum(mask_cathodic)}, Diffusion-limited: {np.sum(mask_diff)}, Ecorr: {np.sum(mask_ecorr)}")
 
     # ---- Plot ----
     fig, ax = plt.subplots(figsize=(7,5))
@@ -264,11 +273,14 @@ if data_file is not None:
     ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr (data-driven)")
     ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
 
-    # Highlight regions for equations/parameters
-    ax.semilogy(E[mask_anodic], np.abs(i_meas[mask_anodic]), "o", color='orange', label="Anodic Tafel region")
-    ax.semilogy(E[mask_cathodic], np.abs(i_meas[mask_cathodic]), "o", color='blue', label="Cathodic Tafel region")
-    ax.semilogy(E[mask_diff], np.abs(i_meas[mask_diff]), "o", color='green', label="Diffusion-limited branch")
-    ax.semilogy(E[mask_ecorr], np.abs(i_meas[mask_ecorr]), "o", color='magenta', label="Ecorr region")
+    ax.semilogy(E[mask_anodic], np.abs(i_meas[mask_anodic]),
+                "o", color='orange', label="Anodic Tafel region")
+    ax.semilogy(E[mask_cathodic], np.abs(i_meas[mask_cathodic]),
+                "o", color='blue', label="Cathodic Tafel region")
+    ax.semilogy(E[mask_diff], np.abs(i_meas[mask_diff]),
+                "o", color='green', label="Diffusion-limited branch")
+    ax.semilogy(E[mask_ecorr], np.abs(i_meas[mask_ecorr]),
+                "o", color='magenta', label="Ecorr region")
 
     ax.set_xlabel("Potential (V)")
     ax.set_ylabel("|i| (A/cm²)")
@@ -277,10 +289,10 @@ if data_file is not None:
     st.pyplot(fig)
 
     st.info(
-        "Colored points show which regions of the data are most sensitive to the model's equations:\n"
+        "Colored points indicate the regions of the polarization curve most strongly associated with each equation/parameter:\n"
         "**Orange:** Anodic Tafel (determines αₐ, i₀ₐ)\n"
         "**Blue:** Cathodic Tafel (determines α_c, i₀_c)\n"
-        "**Green:** Diffusion-limited region (determines i_L)\n"
-        "**Magenta:** Region near Ecorr (mixed potential, net current balance for Ecorr)\n\n"
-        "All parameters are fit globally, but these regions dominate specific terms in the equations."
+        "**Green:** Diffusion-limited (determines i_L; plateau close to lowest |i|)\n"
+        "**Magenta:** Ecorr (mixed potential, net current balance for Ecorr)\n\n"
+        "Automatic detection is current-based, not just voltage-based, making the region selection physically robust."
     )
