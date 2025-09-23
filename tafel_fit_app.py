@@ -1,4 +1,3 @@
-import json
 import math
 import numpy as np
 import pandas as pd
@@ -72,7 +71,6 @@ def downsample(E, I, n_points=100):
     idx = np.linspace(0, len(E)-1, n_points, dtype=int)
     return E[idx], I[idx]
 
-# Tafel region detection function
 def find_tafel_region(E, i_meas, Ecorr, anodic=True, window_size=7, r2_threshold=0.995):
     if anodic:
         mask = (E > Ecorr) & (i_meas > 0)
@@ -92,9 +90,8 @@ def find_tafel_region(E, i_meas, Ecorr, anodic=True, window_size=7, r2_threshold
         r2 = 1 - ss_res/ss_tot if ss_tot != 0 else 0
         if r2 > r2_threshold:
             tafel_windows.append(idx_window)
-    # Flatten, aggregate contiguous windows
     tafel_pts = np.unique(np.concatenate(tafel_windows)) if tafel_windows else np.array([], dtype=int)
-    # Select largest contiguous segment (recommended for reporting)
+    # Select largest contiguous segment:
     if len(tafel_pts) > 0:
         diffs = np.diff(tafel_pts)
         splits = np.where(diffs > 1)[0]
@@ -104,7 +101,6 @@ def find_tafel_region(E, i_meas, Ecorr, anodic=True, window_size=7, r2_threshold
     else:
         return tafel_pts
 
-# ---- Upload ----
 data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv","xlsx","xls"])
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
@@ -123,12 +119,11 @@ if data_file is not None:
     if pot_units == "mV": E_raw /= 1000
     I_raw = df[col_I].astype(float).to_numpy()
     I = I_raw * {"A":1,"mA":1e-3,"uA":1e-6,"nA":1e-9}[cur_units]
-    i_meas = I / area_arr  # A/cm²
+    i_meas = I / area_arr
 
     idx = np.argsort(E_raw)
     E = E_raw[idx]; i_meas = i_meas[idx]
 
-    # ---- Auto-detect Ecorr ----
     sign = np.sign(i_meas)
     zc = np.where(np.diff(sign) != 0)[0]
     if len(zc):
@@ -138,7 +133,6 @@ if data_file is not None:
         Ecorr_guess = E[np.argmin(np.abs(i_meas))]
     st.write(f"Data-driven Ecorr ≈ **{Ecorr_guess:.3f} V**")
 
-    # ---- Single-stage global fit ----
     log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6, 0.5, -8, 0.5, -4, 0
     x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
 
@@ -186,8 +180,6 @@ if data_file is not None:
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
-    # ---- Corrosion rate ----
-    st.markdown("### Corrosion rate")
     mode = st.radio("Material info:", ["I know V_m and z", "I don't know the material"], index=1, horizontal=True)
     if mode == "I know V_m and z":
         z = st.number_input("Valence z (electrons per metal atom)", value=2, min_value=1, step=1)
@@ -222,29 +214,40 @@ if data_file is not None:
                 k = 3.27e-3 * Vm / z
                 st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
         st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
+
     #--- Cosmetic fit ---
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10**spl(E_grid)
-    r2 = r2_score(np.log10(np.abs(i_meas) + 1e-12), spl(E))
-    #--- Automatic Tafel region selection ---
-    # Detect regions using largest contiguous linear segment
+
+    #--- Detect regions for shading ---
     anodic_idx = find_tafel_region(E, i_meas, Ecorr_guess, anodic=True)
     cathodic_idx = find_tafel_region(E, i_meas, Ecorr_guess, anodic=False)
-    # Get region bounds for shading
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx)>0 else (None,None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx)>0 else (None,None)
+    # Diff-limited region: current within X% of lowest
+    diff_limit_thr = 0.15
+    ilim = np.nanmin(i_meas)
+    mask_diff = (i_meas < 0) & (np.abs(i_meas - ilim)/np.abs(ilim) < diff_limit_thr) & (E < Ecorr_guess)
+    diff_indices = np.where(mask_diff)[0]
+    diff_bounds = (E[diff_indices[0]], E[diff_indices[-1]]) if len(diff_indices)>0 else (None,None)
+    # Ecorr region: small band around Ecorr
     ecorr_window = 0.03
+    ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
     #--- Plot with shaded regions ---
     fig, ax = plt.subplots(figsize=(7,5))
-    # Shaded cathodic tafel region
+    # Cathodic Tafel shaded
     if cathodic_bounds[0] is not None:
-        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic active")
-    # Shaded anodic tafel region
+        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.13, label="Cathodic Tafel region")
+    # Diffusion-limited shaded
+    if diff_bounds[0] is not None:
+        ax.axvspan(diff_bounds[0], diff_bounds[1], color='green', alpha=0.13, label="Diffusion-limited branch")
+    # Ecorr region shaded
+    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.08, label="Ecorr region")
+    # Anodic Tafel shaded
     if anodic_bounds[0] is not None:
-        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic active")
-    # Shaded Ecorr region (optional)
-    ax.axvspan(Ecorr_guess-ecorr_window, Ecorr_guess+ecorr_window, color='grey', alpha=0.08, label='Ecorr region')
+        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.13, label="Anodic Tafel region")
+    # Data and fit
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
@@ -254,7 +257,7 @@ if data_file is not None:
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
     st.info(
-        "Tafel regions (active domains) are automatically detected by local linearity in log(|i|) vs E and visualized as shaded areas for publication clarity."
-        "\nRed: Anodic Tafel region. Blue: Cathodic Tafel region. Grey: Ecorr region. \n\n"
-        "Only points with high R² are marked for slope fitting and reporting."
+        "Shaded regions indicate where each model equation predominantly governs the curve:\n"
+        "'Red': Anodic Tafel (activation), 'Blue': Cathodic Tafel (activation), 'Green': Diffusion-limited branch, 'Magenta': Ecorr region.\n"
+        "Region bounds are detected and highlighted automatically for publication clarity."
     )
