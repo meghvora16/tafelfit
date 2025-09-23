@@ -95,6 +95,7 @@ def best_tafel_window(E, i_meas, Ecorr, anodic=True, window_size=7, r2_threshold
     else:
         return np.array([], dtype=int)
 
+# ---- Upload ----
 data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv","xlsx","xls"])
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
@@ -132,6 +133,7 @@ if data_file is not None:
     log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6, 0.5, -8, 0.5, -4, 0
     x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
     maskB = (E >= Ecorr_guess - 0.3) & (E <= Ecorr_guess + 0.3)
+    E_B, i_B = downsample(E[maskB], i_meas[maskB], 120)
     def residuals_B(x):
         pars_local = {
             "i0_a":10**x[0], "alpha_a":x[1],
@@ -139,11 +141,11 @@ if data_file is not None:
             "iL":10**x[4], "Ecorr":x[5],
             "Ru":max(x[6], 0)
         }
-        i_model = simulate_curve(E[maskB], pars_local)
+        i_model = simulate_curve(E_B, pars_local)
         mask = np.isfinite(i_model)
         eps = 1e-15
         r = (np.log10(np.abs(i_model[mask]) + eps) -
-             np.log10(np.abs(i_meas[mask][mask]) + eps))
+             np.log10(np.abs(i_B[mask]) + eps))
         return r
 
     resB = least_squares(
@@ -207,15 +209,14 @@ if data_file is not None:
                 st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
         st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
 
-    # Fit curve
+    # Fit curve for main plot
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10**spl(E_grid)
 
-    # FINAL: Detect correct single best-linear window for Tafel regions
+    # Find Tafel regions: single best-linear window, each branch
     anodic_idx = best_tafel_window(E, i_meas, Ecorr_guess, anodic=True, window_size=7, r2_threshold=0.997)
     cathodic_idx = best_tafel_window(E, i_meas, Ecorr_guess, anodic=False, window_size=7, r2_threshold=0.997)
-
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx)>0 else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx)>0 else (None, None)
 
@@ -229,16 +230,15 @@ if data_file is not None:
     ecorr_window = 0.03
     ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
 
-    # Main plot: |i| vs E
+    # --- Main plot: |i| vs E with shaded regions
     fig, ax = plt.subplots(figsize=(7,5))
-
     if cathodic_bounds[0] is not None:
-        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.13, label="Cathodic Tafel region")
+        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
     if diff_bounds[0] is not None:
         ax.axvspan(diff_bounds[0], diff_bounds[1], color='green', alpha=0.12, label="Diffusion-limited branch")
-    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.15, label="Ecorr region")
+    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.14, label="Ecorr region")
     if anodic_bounds[0] is not None:
-        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.12, label="Anodic Tafel region")
+        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
@@ -248,21 +248,18 @@ if data_file is not None:
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
 
-    # Log(i) vs E plot for direct Tafel segment confirmation
+    # --- Log(|i|) vs E plot to show fitting windows! ---
     fig2, ax2 = plt.subplots(figsize=(7,5))
     logi = np.log10(np.abs(i_meas) + 1e-15)
     ax2.plot(E, logi, "k.", label="log(|i|) data")
-    # Shade Tafel windows
     if cathodic_bounds[0] is not None:
-        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.13, label="Cathodic Tafel window")
-        # Show window fit
+        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel window")
         fitE = E[cathodic_idx]
         fitlogi = logi[cathodic_idx]
         res = linregress(fitE, fitlogi)
         ax2.plot(fitE, res.intercept + res.slope*fitE, color='blue', lw=2)
     if anodic_bounds[0] is not None:
-        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.13, label="Anodic Tafel window")
-        # Show window fit
+        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic Tafel window")
         fitE = E[anodic_idx]
         fitlogi = logi[anodic_idx]
         res = linregress(fitE, fitlogi)
@@ -276,5 +273,6 @@ if data_file is not None:
 
     st.info(
         "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Green=Diffusion-limited, Magenta=Ecorr region.\n"
-        "Only the single most linear (highest R²) window is used for Tafel slope reporting—confirm visually in the log(|i|) vs E plot above!"
+        "ONLY the single, most-linear window is used for Tafel slope reporting on each branch (see log(|i|) vs E plot above for the fit window).\n"
+        "This ensures physically valid, publication-quality analysis."
     )
