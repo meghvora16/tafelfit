@@ -130,7 +130,6 @@ if data_file is not None:
         i_model = simulate_curve(E_B, pars_local)
         mask = np.isfinite(i_model)
         eps = 1e-15
-        # log-magnitude residuals for robustness across decades
         r = (np.log10(np.abs(i_model[mask]) + eps) -
              np.log10(np.abs(i_B[mask]) + eps))
         return r
@@ -170,14 +169,12 @@ if data_file is not None:
         z = st.number_input("Valence z (electrons per metal atom)", value=2, min_value=1, step=1)
         Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0,
                              help="Examples: Fe≈7.09, Al≈10.0, Cu≈7.11, Ni≈6.59, Zn≈9.16, Ti≈10.64, Mg≈14.0 cm³/mol")
-        # CR(mm/yr) = 3270 * i_corr(A/cm²) * V_m(cm³/mol) / z
         if np.isfinite(i_corr) and Vm > 0 and z > 0:
             CR_mm_per_yr = 3270.0 * i_corr * Vm / z
             st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
         else:
             st.warning("Provide positive V_m and z to compute corrosion rate.")
     else:
-        # Unknown material: estimate best value and range across common metals
         materials = {
             "Steel-like (Fe)": (7.09, 2),
             "Aluminum (Al)":   (10.0, 3),
@@ -187,7 +184,6 @@ if data_file is not None:
             "Titanium (Ti)":   (10.64, 4),
             "Magnesium (Mg)":  (14.0, 2),
         }
-        # Factor per μA/cm²: k = 3.27e-3 * V_m / z  [mm/year per μA/cm²]
         k_list = np.array([3.27e-3 * Vm / z for (Vm, z) in materials.values()])
         k_med = float(np.median(k_list))
         k_min = float(np.min(k_list))
@@ -206,7 +202,6 @@ if data_file is not None:
                 st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
         st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
 
-    # ---- Methods and equations (added for documentation only; outputs unchanged) ----
     with st.expander("Methods and equations used"):
         st.markdown(r"""
 **Model**
@@ -254,14 +249,38 @@ if data_file is not None:
     i_smooth = 10**spl(E_grid)
     r2 = r2_score(np.log10(np.abs(i_meas) + 1e-12), spl(E))
 
+    # ---- Highlight regions: mask arrays ----
+    # Define regions near Ecorr, anodic, cathodic, diffusion limit
+    # You can tweak ±0.03 and ±0.2 for your application
+    mask_anodic = E > Ecorr_guess + 0.03             # Anodic Tafel
+    mask_cathodic = E < Ecorr_guess - 0.03           # Cathodic Tafel
+    mask_ecorr = (E >= Ecorr_guess - 0.03) & (E <= Ecorr_guess + 0.03) # Mixed potential, Ecorr region
+    mask_diff = (E < Ecorr_guess - 0.2)              # Diffusion-limited branch
+
     # ---- Plot ----
-    fig, ax = plt.subplots()
-    ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
-    ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
-    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr")
+    fig, ax = plt.subplots(figsize=(7,5))
+    ax.semilogy(E, np.abs(i_meas), "k.", label="All data")
+    ax.semilogy(E_grid, i_smooth, "r-", label="Global Fit")
+    ax.axvline(Ecorr_guess, color="b", linestyle="--", label="Ecorr (data-driven)")
     ax.axvline(pars["Ecorr"], color="g", linestyle="--", label="Fitted Ecorr")
+
+    # Highlight regions for equations/parameters
+    ax.semilogy(E[mask_anodic], np.abs(i_meas[mask_anodic]), "o", color='orange', label="Anodic Tafel region")
+    ax.semilogy(E[mask_cathodic], np.abs(i_meas[mask_cathodic]), "o", color='blue', label="Cathodic Tafel region")
+    ax.semilogy(E[mask_diff], np.abs(i_meas[mask_diff]), "o", color='green', label="Diffusion-limited branch")
+    ax.semilogy(E[mask_ecorr], np.abs(i_meas[mask_ecorr]), "o", color='magenta', label="Ecorr region")
+
     ax.set_xlabel("Potential (V)")
     ax.set_ylabel("|i| (A/cm²)")
     ax.grid(True, which="both")
-    ax.legend()
+    ax.legend(fontsize=9, loc="best")
     st.pyplot(fig)
+
+    st.info(
+        "Colored points show which regions of the data are most sensitive to the model's equations:\n"
+        "**Orange:** Anodic Tafel (determines αₐ, i₀ₐ)\n"
+        "**Blue:** Cathodic Tafel (determines α_c, i₀_c)\n"
+        "**Green:** Diffusion-limited region (determines i_L)\n"
+        "**Magenta:** Region near Ecorr (mixed potential, net current balance for Ecorr)\n\n"
+        "All parameters are fit globally, but these regions dominate specific terms in the equations."
+    )
