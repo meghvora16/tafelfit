@@ -264,27 +264,15 @@ if data_file is not None:
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # Adaptive Tafel region detection!
+    # Adaptive anodic Tafel region detection
     anodic_idx, anodic_min_size, anodic_r2, anodic_ndec = adaptive_tafel_region(E, i_meas, Ecorr_guess, anodic=True)
+    # Optionally you may keep the cathodic region (just ignore it for shading).
     cathodic_idx, cathodic_min_size, cathodic_r2, cathodic_ndec = adaptive_tafel_region(E, i_meas, Ecorr_guess, anodic=False)
-
     anodic_found = len(anodic_idx) > 0
-    cathodic_found = len(cathodic_idx) > 0
-
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if anodic_found else (None, None)
-    cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if cathodic_found else (None, None)
 
     # Find where the diffusion region starts on anodic branch (>10% deviation from linear fit)
     anode_diff_start = get_tafel_fit_deviation(E, i_meas, anodic_idx, direction="right", deviation=0.10) if anodic_found else None
-
-    # Diffusion-limited (cathodic branch)
-    diff_limit_thr = 0.20
-    ilim = np.nanmin(i_meas)
-    mask_diff = (i_meas < 0) & (np.abs(i_meas - ilim) / np.abs(ilim) < diff_limit_thr) & (E < Ecorr_guess)
-    diff_indices = np.where(mask_diff)[0]
-    diff_bounds = (E[diff_indices[0]], E[diff_indices[-1]]) if len(diff_indices) > 0 else (None, None)
-
-    # Anodic diffusion-limited region: from anode_diff_start to max E
     anodic_diff_bounds = (None, None)
     if anodic_found and anode_diff_start is not None:
         idx_start = np.argmin(np.abs(E - anode_diff_start))
@@ -296,17 +284,13 @@ if data_file is not None:
 
     # -------------------------- MAIN PLOT ----------------------------
     fig, ax = plt.subplots(figsize=(7, 5))
-    if cathodic_bounds[0] is not None:
-        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
     if anodic_bounds[0] is not None:
         ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
-    if diff_bounds[0] is not None:
-        ax.axvspan(diff_bounds[0], diff_bounds[1], color='green', alpha=0.10, label="Cathodic diffusion-limited")
     if anodic_diff_bounds[0] is not None:
-        ax.axvspan(anodic_diff_bounds[0], anodic_diff_bounds[1], color='yellow', alpha=0.12, label="Anodic diffusion-limited")
-    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.13, label="Ecorr region")
+        ax.axvspan(anodic_diff_bounds[0], anodic_diff_bounds[1], color='yellow', alpha=0.15, label="Anodic diffusion-limited")
+    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.12, label="Ecorr region")
     if anode_diff_start is not None:
-        ax.axvline(anode_diff_start, color='orange', lw=2, linestyle='--', label='Anodic diffusion onset (>10% deviation)')
+        ax.axvline(anode_diff_start, color='orange', lw=2, linestyle='--', label='Start of anodic diffusion-limited')
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
@@ -320,12 +304,6 @@ if data_file is not None:
     fig2, ax2 = plt.subplots(figsize=(7, 5))
     logi = np.log10(np.abs(i_meas) + 1e-15)
     ax2.plot(E, logi, "k.", label="log(|i|) data")
-    if cathodic_bounds[0] is not None:
-        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel window")
-        fitE = E[cathodic_idx]
-        fitlogi = logi[cathodic_idx]
-        res = linregress(fitE, fitlogi)
-        ax2.plot(fitE, res.intercept + res.slope * fitE, color='blue', lw=2)
     if anodic_bounds[0] is not None:
         ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic Tafel window")
         fitE = E[anodic_idx]
@@ -333,7 +311,7 @@ if data_file is not None:
         res = linregress(fitE, fitlogi)
         ax2.plot(fitE, res.intercept + res.slope * fitE, color='red', lw=2)
     if anode_diff_start is not None:
-        ax2.axvline(anode_diff_start, color='orange', lw=2, linestyle='--', label='Anodic diffusion onset (>10% deviation)')
+        ax2.axvline(anode_diff_start, color='orange', lw=2, linestyle='--', label='Start of anodic diffusion-limited')
     ax2.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax2.set_xlabel("Potential (V)")
     ax2.set_ylabel("log |i| (A/cm²)")
@@ -352,9 +330,8 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Yellow=Anodic diffusion-limited, Green=Cathodic diffusion-limited, Magenta=Ecorr region.\n"
-        "The Tafel region finder automatically relaxes its threshold and reports optimal parameters when needed.\n"
-        "The longest contiguous, high-linearity region is used for each Tafel slope. The diffusion onset (anodic) is marked by orange dashed line (>10% deviation)."
+        "Shaded regions: Red = Anodic Tafel, Yellow = Anodic diffusion-limited (>10% deviation after Tafel region), Magenta = Ecorr region. "
+        "The Tafel region finder automatically adapts. The diffusion region starts where the data first departs from Tafel fit by >10%."
     )
 
     # --- Export parameters as CSV ---
@@ -373,16 +350,11 @@ if data_file is not None:
         'Tafel linear anodic E_start (V)': [anodic_bounds[0]],
         'Tafel linear anodic E_end (V)': [anodic_bounds[1]],
         'Diffusion onset anodic (V)': [anode_diff_start],
-        'Tafel linear cathodic E_start (V)': [cathodic_bounds[0]],
-        'Tafel linear cathodic E_end (V)': [cathodic_bounds[1]],
         'Anodic diffusion-limited region start (V)': [anodic_diff_bounds[0]],
         'Anodic diffusion-limited region end (V)': [anodic_diff_bounds[1]],
         'Anodic region min_size': [anodic_min_size],
         'Anodic region r2_threshold': [anodic_r2],
         'Anodic region min_decades': [anodic_ndec],
-        'Cathodic region min_size': [cathodic_min_size],
-        'Cathodic region r2_threshold': [cathodic_r2],
-        'Cathodic region min_decades': [cathodic_ndec],
     }
     params_df = pd.DataFrame(param_dict)
     csv_bytes = params_df.to_csv(index=False).encode()
