@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.interpolate import UnivariateSpline
 from scipy.stats import linregress
+import io
 
 st.set_page_config(page_title="Global Implicit Tafel Fit", layout="wide")
 
@@ -14,10 +15,8 @@ R = 8.314462618
 
 st.title("Global Implicit Tafel Fit")
 
-
 def beta_from_alpha(alpha, n=1, T=298.15):
     return 2.303 * R * T / (max(alpha, 1e-6) * n * F)
-
 
 def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
     try:
@@ -61,7 +60,6 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
             break
     return i
 
-
 def simulate_curve(E_arr, pars, T=298.15, n=1):
     out = []
     i_guess = 0.0
@@ -73,15 +71,14 @@ def simulate_curve(E_arr, pars, T=298.15, n=1):
         out.append(val)
     return np.array(out)
 
-
 def downsample(E, I, n_points=100):
     if len(E) <= n_points:
         return E, I
     idx = np.linspace(0, len(E) - 1, n_points, dtype=int)
     return E[idx], I[idx]
 
-
-def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995):
+def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995, min_decades=1.0):
+    # Finds the longest region where the log current is linear vs. E, spans at least min_decades, and R2 > r2_threshold
     if anodic:
         mask = (E > Ecorr) & (i_meas > 0)
     else:
@@ -95,6 +92,8 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
             if len(idx_window) < min_size:
                 continue
             logi = np.log10(np.abs(i_meas[idx_window]) + 1e-15)
+            if np.ptp(logi) < min_decades:
+                continue
             fit = linregress(E[idx_window], logi)
             fitvals = fit.intercept + fit.slope * E[idx_window]
             ss_res = np.sum((logi - fitvals) ** 2)
@@ -108,6 +107,23 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     else:
         return np.array([], dtype=int)
 
+def get_tafel_fit_deviation(E, i_meas, idx_fit, direction="right", deviation=0.10):
+    # Given a linear fit window, find where the deviation from the linear fit exceeds threshold
+    if len(idx_fit) < 2:
+        return None
+    E_fit = E[idx_fit]
+    logi_fit = np.log10(np.abs(i_meas[idx_fit]) + 1e-15)
+    fit = linregress(E_fit, logi_fit)
+    predicted = fit.intercept + fit.slope * E
+    logi_meas = np.log10(np.abs(i_meas) + 1e-15)
+    errors = np.abs(10 ** logi_meas - 10 ** predicted) / np.maximum(np.abs(10 ** predicted), 1e-30)
+    # On the anodic branch, we look to *higher* potentials than end of fit, cathodic to *lower*
+    last_idx = idx_fit[-1] if direction == "right" else idx_fit[0]
+    search_range = range(last_idx + 1, len(E)) if direction == "right" else range(last_idx - 1, -1, -1)
+    for i in search_range:
+        if errors[i] > deviation:
+            return E[i]
+    return None
 
 data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv", "xlsx", "xls"])
 if data_file is not None:
@@ -197,8 +213,10 @@ if data_file is not None:
         Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0)
         if np.isfinite(i_corr) and Vm > 0 and z > 0:
             CR_mm_per_yr = 3270.0 * i_corr * Vm / z
-            st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
+            CR_info = f"{CR_mm_per_yr:.3f} mm/year"
+            st.write(f"Corrosion rate = **{CR_info}** (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
         else:
+            CR_info = "N/A"
             st.warning("Provide positive V_m and z to compute corrosion rate.")
     else:
         materials = {
@@ -216,6 +234,7 @@ if data_file is not None:
         k_max = float(np.max(k_list))
         i_corr_uA = i_corr * 1e6
         cr_est = k_med * i_corr_uA
+        CR_info = f"{cr_est:.3f} mm/year"
         cr_low = k_min * i_corr_uA
         cr_high = k_max * i_corr_uA
         st.write(f"Estimated corrosion rate = **{cr_est:.3f} mm/year**")
@@ -231,14 +250,23 @@ if data_file is not None:
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # Find Tafel regions: longest linear region, each branch (publication standard)
-    anodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=True, min_size=6, r2_threshold=0.995)
-    cathodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=False, min_size=6, r2_threshold=0.995)
+    # Tafel regions
+    anodic_idx = longest_linear_tafel_region(
+        E, i_meas, Ecorr_guess,
+        anodic=True, min_size=6, r2_threshold=0.995, min_decades=1.0
+    )
+    cathodic_idx = longest_linear_tafel_region(
+        E, i_meas, Ecorr_guess,
+        anodic=False, min_size=6, r2_threshold=0.995, min_decades=1.0
+    )
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx) > 0 else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx) > 0 else (None, None)
 
-    # Diffusion-limited (green)
-    diff_limit_thr = 0.20    # <---- Increase to 0.20 or more to include more plateau points
+    # Find where the diffusion region starts on anodic branch (where deviation >10% from linear fit)
+    anode_diff_start = get_tafel_fit_deviation(E, i_meas, anodic_idx, direction="right", deviation=0.10) if len(anodic_idx) > 0 else None
+
+    # Diffusion-limited (green, only for cathodic branch; for anodic: mark start by deviation)
+    diff_limit_thr = 0.20
     ilim = np.nanmin(i_meas)
     mask_diff = (i_meas < 0) & (np.abs(i_meas - ilim) / np.abs(ilim) < diff_limit_thr) & (E < Ecorr_guess)
     diff_indices = np.where(mask_diff)[0]
@@ -256,6 +284,8 @@ if data_file is not None:
     ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.14, label="Ecorr region")
     if anodic_bounds[0] is not None:
         ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
+    if anode_diff_start is not None:
+        ax.axvline(anode_diff_start, color='green', lw=2, linestyle='--', label='Anodic diffusion onset (>10% deviation)')
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
@@ -281,6 +311,8 @@ if data_file is not None:
         fitlogi = logi[anodic_idx]
         res = linregress(fitE, fitlogi)
         ax2.plot(fitE, res.intercept + res.slope * fitE, color='red', lw=2)
+    if anode_diff_start is not None:
+        ax2.axvline(anode_diff_start, color='green', lw=2, linestyle='--', label='Anodic diffusion onset (>10% deviation)')
     ax2.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax2.set_xlabel("Potential (V)")
     ax2.set_ylabel("log |i| (A/cm²)")
@@ -300,6 +332,34 @@ if data_file is not None:
 
     st.info(
         "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Green=Diffusion-limited, Magenta=Ecorr region.\n"
-        "ONLY the longest contiguous, high-linearity region is used for Tafel slope reporting on each branch (see log(|i|) vs E plot above for the fit window).\n"
+        "The longest contiguous, high-linearity region (≥1 decade, R²>0.995) is used for each Tafel slope. The diffusion onset (anodic) is marked by green dashed line (>10% deviation from Tafel fit).\n"
         "At the bottom: raw Tafel plot for visual checking of your uploaded data."
+    )
+
+    # --- Export parameters as CSV ---
+    param_dict = {
+        'i0_a (A/cm²)': [pars["i0_a"]],
+        'alpha_a': [pars["alpha_a"]],
+        'i0_c (A/cm²)': [pars["i0_c"]],
+        'alpha_c': [pars["alpha_c"]],
+        'iL (A/cm²)': [pars["iL"]],
+        'Ecorr (V)': [pars["Ecorr"]],
+        'Ru (ohm·cm²)': [pars["Ru"]],
+        'beta_a (V/decade)': [beta_a],
+        'beta_c (V/decade)': [beta_c],
+        'i_corr (A/cm²)': [i_corr],
+        'Fitted corrosion rate (mm/year)': [CR_info],
+        'Tafel linear anodic E_start (V)': [anodic_bounds[0]],
+        'Tafel linear anodic E_end (V)': [anodic_bounds[1]],
+        'Diffusion onset anodic (V)': [anode_diff_start],
+        'Tafel linear cathodic E_start (V)': [cathodic_bounds[0]],
+        'Tafel linear cathodic E_end (V)': [cathodic_bounds[1]],
+    }
+    params_df = pd.DataFrame(param_dict)
+    csv_bytes = params_df.to_csv(index=False).encode()
+    st.download_button(
+        "Download Fit Parameters (CSV)",
+        data=csv_bytes,
+        file_name="tafel_fit_parameters.csv",
+        mime="text/csv"
     )
