@@ -76,7 +76,7 @@ def downsample(E, I, n_points=100):
     idx = np.linspace(0, len(E) - 1, n_points, dtype=int)
     return E[idx], I[idx]
 
-def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995, min_decades=1.0):
+def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=2, r2_threshold=0.97, min_decades=0.3):
     if anodic:
         mask = (E > Ecorr) & (i_meas > 0)
     else:
@@ -105,58 +105,9 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     else:
         return np.array([], dtype=int)
 
-def adaptive_tafel_region(E, i_meas, Ecorr, anodic=True, min_decades=1.0):
-    params_grid = [
-        (8, 0.995, min_decades),
-        (6, 0.990, min_decades),
-        (5, 0.985, min_decades),
-        (4, 0.980, min_decades),
-        (3, 0.970, min_decades),
-        (2, 0.950, min_decades),
-    ]
-    for min_size, r2_threshold, _min_decades in params_grid:
-        idx = longest_linear_tafel_region(E, i_meas, Ecorr,
-                anodic=anodic, min_size=min_size, r2_threshold=r2_threshold, min_decades=_min_decades)
-        if len(idx) >= min_size:
-            st.info(f"{'Anodic' if anodic else 'Cathodic'} Tafel region found: min_size={min_size}, min_decades={_min_decades}, r2_threshold={r2_threshold:.3f}")
-            return idx, min_size, r2_threshold, min_decades
-    st.warning(f"No {'anodic' if anodic else 'cathodic'} Tafel region found even after relaxing criteria. Review your data or lower requirements.")
-    return np.array([], dtype=int), None, None, None
-
-def anodic_linear_until_deviation(E, i_meas, Ecorr, min_decades, deviation_thresh):
-    anodic_idx_init, _, _, _ = adaptive_tafel_region(E, i_meas, Ecorr, anodic=True, min_decades=min_decades)
-    if len(anodic_idx_init) < 3:
-        return anodic_idx_init, None
-    # Fit only to initial region
-    fit_x = E[anodic_idx_init]
-    fit_y = np.log10(np.abs(i_meas[anodic_idx_init]) + 1e-15)
-    fit = linregress(fit_x, fit_y)
-    new_idx = [anodic_idx_init[0]]
-    # extend through initial region by local deviation
-    for idx in anodic_idx_init[1:]:
-        logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
-        fitval = fit.intercept + fit.slope * E[idx]
-        if abs(logi - fitval) > deviation_thresh:
-            return np.array(new_idx), E[idx]
-        new_idx.append(idx)
-    # Optionally, extend to next points (full branch)
-    last_idx = new_idx[-1]
-    for idx in range(last_idx+1, len(E)):
-        logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
-        fitval = fit.intercept + fit.slope * E[idx]
-        if abs(logi - fitval) > deviation_thresh:
-            return np.array(new_idx), E[idx]
-        new_idx.append(idx)
-    return np.array(new_idx), None
-
-def cathodic_linear_region(E, i_meas, Ecorr, min_decades):
-    cathodic_idx, cat_min_size, cat_r2, cat_ndec = adaptive_tafel_region(E, i_meas, Ecorr, anodic=False, min_decades=min_decades)
-    return cathodic_idx
-
-# ==== Streamlit UI ====
 data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
-deviation_thresh = st.slider("Deviation threshold for end of anodic Tafel region (log(|i|), e.g. 0.05 ~ 10%)", min_value=0.01, max_value=0.10, value=0.05, step=0.01)
-min_decades = st.slider("Minimum Tafel window dynamic range (decades)", min_value=0.5, max_value=2.5, value=1.0, step=0.1)
+deviation_thresh = st.slider("Deviation threshold for end of anodic Tafel region (log(|i|), e.g. 0.05 = ~10%)", min_value=0.02, max_value=0.17, value=0.07, step=0.01)
+min_decades = st.slider("Minimum Tafel window dynamic range (decades)", min_value=0.3, max_value=2.5, value=0.7, step=0.1)
 
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
@@ -237,56 +188,44 @@ if data_file is not None:
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
-    # --- Corrosion rate ---
-    st.markdown("### Corrosion rate")
-    mode = st.radio("Material info:", ["I know V_m and z", "I don't know the material"], index=1, horizontal=True)
-    if mode == "I know V_m and z":
-        z = st.number_input("Valence z (electrons per metal atom)", value=2, min_value=1, step=1)
-        Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0)
-        if np.isfinite(i_corr) and Vm > 0 and z > 0:
-            CR_mm_per_yr = 3270.0 * i_corr * Vm / z
-            CR_info = f"{CR_mm_per_yr:.3f} mm/year"
-            st.write(f"Corrosion rate = **{CR_info}** (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
-        else:
-            CR_info = "N/A"
-            st.warning("Provide positive V_m and z to compute corrosion rate.")
-    else:
-        materials = {
-            "Steel-like (Fe)": (7.09, 2),
-            "Aluminum (Al)": (10.0, 3),
-            "Copper (Cu)": (7.11, 2),
-            "Nickel (Ni)": (6.59, 2),
-            "Zinc (Zn)": (9.16, 2),
-            "Titanium (Ti)": (10.64, 4),
-            "Magnesium (Mg)": (14.0, 2),
-        }
-        k_list = np.array([3.27e-3 * Vm / z for (Vm, z) in materials.values()])
-        k_med = float(np.median(k_list))
-        k_min = float(np.min(k_list))
-        k_max = float(np.max(k_list))
-        i_corr_uA = i_corr * 1e6
-        cr_est = k_med * i_corr_uA
-        CR_info = f"{cr_est:.3f} mm/year"
-        cr_low = k_min * i_corr_uA
-        cr_high = k_max * i_corr_uA
-        st.write(f"Estimated corrosion rate = **{cr_est:.3f} mm/year**")
-        st.write(f"Typical range across common metals: **{cr_low:.3f} – {cr_high:.3f} mm/year**")
-        with st.expander("Assumptions and per-μA factors"):
-            for name, (Vm, z) in materials.items():
-                k = 3.27e-3 * Vm / z
-                st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
-        st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
-
-    # --- Curve fitting for main plot (with smoothing) ---
+    # Curve fitting for main plot (with smoothing)
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # --- Detect Tafel regions ---
-    anodic_idx, anode_diff_start = anodic_linear_until_deviation(E, i_meas, Ecorr_guess, min_decades, deviation_thresh)
-    cathodic_idx = cathodic_linear_region(E, i_meas, Ecorr_guess, min_decades)
-    anodic_found = len(anodic_idx) > 0
-    cathodic_found = len(cathodic_idx) > 0
+    ### Find cathodic Tafel region in usual way (global longest linear window)
+    cathodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=False, min_size=2, r2_threshold=0.97, min_decades=min_decades)
+
+    ### Find the anodic region, but truncate at local deviation
+    anodic_idx_init = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=True, min_size=2, r2_threshold=0.97, min_decades=min_decades)
+    if len(anodic_idx_init) < 2:
+        st.warning("No anodic Tafel region found.")
+        anodic_idx = []
+        anode_diff_start = None
+    else:
+        fit_x = E[anodic_idx_init]
+        fit_y = np.log10(np.abs(i_meas[anodic_idx_init]) + 1e-15)
+        fit = linregress(fit_x, fit_y)
+        new_idx = [anodic_idx_init[0]]
+        for idx in anodic_idx_init[1:]:
+            logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
+            fitval = fit.intercept + fit.slope * E[idx]
+            if abs(logi - fitval) > deviation_thresh:
+                break
+            new_idx.append(idx)
+        last_idx = new_idx[-1]
+        # Try to extend further if points still fit
+        for idx in range(last_idx+1, len(E)):
+            logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
+            fitval = fit.intercept + fit.slope * E[idx]
+            if abs(logi - fitval) > deviation_thresh:
+                break
+            new_idx.append(idx)
+        anodic_idx = np.array(new_idx)
+        anode_diff_start = E[anodic_idx[-1]+1] if anodic_idx[-1]+1 < len(E) else None
+
+    anodic_found = len(anodic_idx) > 1
+    cathodic_found = len(cathodic_idx) > 1
 
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if anodic_found else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if cathodic_found else (None, None)
@@ -295,11 +234,11 @@ if data_file is not None:
     ecorr_window = 0.03
     ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
 
-    # ---- Main Plot ----
+    # Main plot
     fig, ax = plt.subplots(figsize=(7, 5))
     if cathodic_found and cathodic_bounds[0] is not None and cathodic_bounds[1] is not None:
         ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
-    if anodic_bounds[0] is not None and anodic_bounds[1] is not None:
+    if anodic_found and anodic_bounds[0] is not None and anodic_bounds[1] is not None:
         ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
     if anodic_diff_bounds[0] is not None and anodic_diff_bounds[1] is not None:
         ax.axvspan(anodic_diff_bounds[0], anodic_diff_bounds[1], color='yellow', alpha=0.15, label="Anodic diffusion-limited")
@@ -315,7 +254,7 @@ if data_file is not None:
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
 
-    # --- Log(|i|) vs E plot to show fitting windows with fitted lines ---
+    # Log(|i|) plots for fit windows
     fig2, ax2 = plt.subplots(figsize=(7, 5))
     logi = np.log10(np.abs(i_meas) + 1e-15)
     ax2.plot(E, logi, "k.", label="log(|i|) data")
@@ -325,7 +264,7 @@ if data_file is not None:
         fitlogi_c = logi[cathodic_idx]
         res_c = linregress(fitE_c, fitlogi_c)
         ax2.plot(fitE_c, res_c.intercept + res_c.slope * fitE_c, color='blue', lw=2)
-    if anodic_bounds[0] is not None and anodic_bounds[1] is not None:
+    if anodic_found and anodic_bounds[0] is not None and anodic_bounds[1] is not None:
         ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic Tafel window")
         fitE_a = E[anodic_idx]
         fitlogi_a = logi[anodic_idx]
@@ -340,7 +279,7 @@ if data_file is not None:
     ax2.legend(loc="lower right", fontsize=9)
     st.pyplot(fig2)
 
-    # --- Raw Tafel plot ---
+    # Raw plot
     fig_raw, ax_raw = plt.subplots(figsize=(7, 5))
     ax_raw.plot(E, np.log10(np.abs(i_meas) + 1e-15), "ko", ms=4, label="Raw data")
     ax_raw.set_xlabel("Potential (V)")
@@ -351,11 +290,11 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel (ending on first deviation), Yellow = Anodic diffusion-limited (starts at deviation after Tafel region), Magenta = Ecorr.\n"
-        f"Minimum Tafel region dynamic range: {min_decades} decades. Deviation threshold: {deviation_thresh:.3f} log(|i|) units."
+        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel (ends on local deviation!), Yellow = Anodic diffusion-limited (starts at deviation after Tafel region), Magenta = Ecorr.\n"
+        f"Minimum Tafel region dynamic range: {min_decades} decades. Deviation threshold: {deviation_thresh:.3f} log(|i|) units (~{100.*deviation_thresh:.0f}% diff)."
     )
 
-    # --- Export parameters as CSV ---
+    # Export CSV
     param_dict = {
         'i0_a (A/cm²)': [pars["i0_a"]],
         'alpha_a': [pars["alpha_a"]],
@@ -367,7 +306,6 @@ if data_file is not None:
         'beta_a (V/decade)': [beta_a],
         'beta_c (V/decade)': [beta_c],
         'i_corr (A/cm²)': [i_corr],
-        'Fitted corrosion rate (mm/year)': [CR_info],
         'Tafel linear anodic E_start (V)': [anodic_bounds[0]],
         'Tafel linear anodic E_end (V)': [anodic_bounds[1]],
         'Diffusion onset anodic (V)': [anode_diff_start],
