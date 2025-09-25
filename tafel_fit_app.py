@@ -105,34 +105,33 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     else:
         return np.array([], dtype=int)
 
-def adaptive_tafel_region(E, i_meas, Ecorr, anodic=True):
+def adaptive_tafel_region(E, i_meas, Ecorr, anodic=True, min_decades=1.0):
     params_grid = [
-        (8, 0.995, 1.0),
-        (6, 0.990, 0.8),
-        (5, 0.985, 0.7),
-        (4, 0.980, 0.6),
-        (3, 0.970, 0.5),
-        (2, 0.950, 0.25),
+        (8, 0.995, min_decades),
+        (6, 0.990, min_decades),
+        (5, 0.985, min_decades),
+        (4, 0.980, min_decades),
+        (3, 0.970, min_decades),
+        (2, 0.950, min_decades),
     ]
-    for min_size, r2_threshold, min_decades in params_grid:
+    for min_size, r2_threshold, _min_decades in params_grid:
         idx = longest_linear_tafel_region(E, i_meas, Ecorr,
-                anodic=anodic, min_size=min_size, r2_threshold=r2_threshold, min_decades=min_decades)
+                anodic=anodic, min_size=min_size, r2_threshold=r2_threshold, min_decades=_min_decades)
         if len(idx) >= min_size:
-            st.info(f"{'Anodic' if anodic else 'Cathodic'} Tafel region found: min_size={min_size}, min_decades={min_decades}, r2_threshold={r2_threshold:.3f}")
+            st.info(f"{'Anodic' if anodic else 'Cathodic'} Tafel region found: min_size={min_size}, min_decades={_min_decades}, r2_threshold={r2_threshold:.3f}")
             return idx, min_size, r2_threshold, min_decades
     st.warning(f"No {'anodic' if anodic else 'cathodic'} Tafel region found even after relaxing criteria. Try reviewing your data!")
     return np.array([], dtype=int), None, None, None
 
-def anodic_linear_until_deviation(E, i_meas, Ecorr):
+def anodic_linear_until_deviation(E, i_meas, Ecorr, min_decades, deviation_thresh):
     # Find initial candidate anodic region
-    anodic_idx_init, _, _, _ = adaptive_tafel_region(E, i_meas, Ecorr, anodic=True)
+    anodic_idx_init, _, _, _ = adaptive_tafel_region(E, i_meas, Ecorr, anodic=True, min_decades=min_decades)
     if len(anodic_idx_init) < 3:
         return anodic_idx_init, None
     E_fit = E[anodic_idx_init]
     logi_fit = np.log10(np.abs(i_meas[anodic_idx_init]) + 1e-15)
     fit = linregress(E_fit, logi_fit)
     # Step forward after fit region, stop at first significant deviation
-    deviation_thresh = 0.05  # ~11%
     extended_idx = list(anodic_idx_init)
     for idx in range(anodic_idx_init[-1]+1, len(E)):
         logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
@@ -142,29 +141,17 @@ def anodic_linear_until_deviation(E, i_meas, Ecorr):
         extended_idx.append(idx)
     return np.array(extended_idx), None
 
-# Deviation threshold for the cathodic branch (optional, stick to longest region)
-def cathodic_linear_region(E, i_meas, Ecorr):
-    cathodic_idx, cat_min_size, cat_r2, cat_ndec = adaptive_tafel_region(E, i_meas, Ecorr, anodic=False)
+def cathodic_linear_region(E, i_meas, Ecorr, min_decades):
+    cathodic_idx, cat_min_size, cat_r2, cat_ndec = adaptive_tafel_region(E, i_meas, Ecorr, anodic=False, min_decades=min_decades)
     return cathodic_idx
 
-def get_tafel_fit_deviation(E, i_meas, idx_fit, direction="right", deviation=0.10):
-    if len(idx_fit) < 2:
-        return None
-    E_fit = E[idx_fit]
-    logi_fit = np.log10(np.abs(i_meas[idx_fit]) + 1e-15)
-    fit = linregress(E_fit, logi_fit)
-    predicted = fit.intercept + fit.slope * E
-    logi_meas = np.log10(np.abs(i_meas) + 1e-15)
-    errors = np.abs(10 ** logi_meas - 10 ** predicted) / np.maximum(np.abs(10 ** predicted), 1e-30)
-    last_idx = idx_fit[-1] if direction == "right" else idx_fit[0]
-    search_range = range(last_idx + 1, len(E)) if direction == "right" else range(last_idx - 1, -1, -1)
-    for i in search_range:
-        if errors[i] > deviation:
-            return E[i]
-    return None
+# --- Streamlit UI: deviation slider and min decades ---
+data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
+deviation_thresh = st.slider("Deviation threshold for end of anodic Tafel region (in log|i| units)", min_value=0.01, max_value=0.10, value=0.05, step=0.01,
+        help="0.05 ~ 11% deviation from Tafel fit. Adjust to fine-tune where linear region ends!")
+min_decades = st.slider("Minimum dynamic range of Tafel regions (decades)", min_value=0.5, max_value=2.5, value=1.0, step=0.1,
+        help="At least this many decades of current change in Tafel region required.")
 
-# --- Upload and process data ---------------------------------------------------------
-data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv", "xlsx", "xls"])
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
     st.success(f"Loaded {len(df)} rows.")
@@ -289,13 +276,12 @@ if data_file is not None:
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # --- Detect Tafel regions (cathodic: as previous, anodic: up to deviation) ---
-    anodic_idx, anode_diff_start = anodic_linear_until_deviation(E, i_meas, Ecorr_guess)
-    cathodic_idx = cathodic_linear_region(E, i_meas, Ecorr_guess)
+    # --- Detect Tafel regions ---
+    anodic_idx, anode_diff_start = anodic_linear_until_deviation(E, i_meas, Ecorr_guess, min_decades, deviation_thresh)
+    cathodic_idx = cathodic_linear_region(E, i_meas, Ecorr_guess, min_decades)
     anodic_found = len(anodic_idx) > 0
     cathodic_found = len(cathodic_idx) > 0
 
-    # --- Define plot windows ---
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if anodic_found else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if cathodic_found else (None, None)
     anodic_diff_bounds = (None, None)
@@ -303,11 +289,10 @@ if data_file is not None:
         idx_start = np.argmin(np.abs(E - anode_diff_start))
         anodic_diff_bounds = (E[idx_start], E[-1])
 
-    # Ecorr region
     ecorr_window = 0.03
     ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
 
-    # -- Main Plot --
+    # ---- Main Plot ----
     fig, ax = plt.subplots(figsize=(7, 5))
     if cathodic_found and cathodic_bounds[0] is not None and cathodic_bounds[1] is not None:
         ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
@@ -363,8 +348,8 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel, Yellow = Anodic diffusion-limited (starts at >5% deviation after Tafel region), Magenta = Ecorr.\n"
-        "For the anodic branch, the linear region ends at the first significant deviation from the fit (more accurate for mixed-control systems)."
+        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel, Yellow = Anodic diffusion-limited (starts at deviation after Tafel region), Magenta = Ecorr.\n"
+        f"Minimum Tafel region dynamic range: {min_decades} decades. Deviation threshold: {deviation_thresh:.3f} in log(|i|) units (set by slider above)."
     )
 
     # --- Export parameters as CSV ---
@@ -387,6 +372,8 @@ if data_file is not None:
         'Anodic diffusion-limited region end (V)': [anodic_diff_bounds[1]],
         'Tafel linear cathodic E_start (V)': [cathodic_bounds[0]],
         'Tafel linear cathodic E_end (V)': [cathodic_bounds[1]],
+        'Minimum Tafel region log decades': [min_decades],
+        'Deviation threshold log(|i|)': [deviation_thresh],
     }
     params_df = pd.DataFrame(param_dict)
     csv_bytes = params_df.to_csv(index=False).encode()
