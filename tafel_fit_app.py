@@ -105,6 +105,24 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     else:
         return np.array([], dtype=int)
 
+def adaptive_tafel_region(E, i_meas, Ecorr, anodic=True):
+    params_grid = [
+        (8, 0.995, 1.0),
+        (6, 0.990, 0.8),
+        (5, 0.985, 0.7),
+        (4, 0.980, 0.6),
+        (3, 0.970, 0.5),
+        (2, 0.950, 0.25),
+    ]
+    for min_size, r2_threshold, min_decades in params_grid:
+        idx = longest_linear_tafel_region(E, i_meas, Ecorr,
+                anodic=anodic, min_size=min_size, r2_threshold=r2_threshold, min_decades=min_decades)
+        if len(idx) >= min_size:
+            st.info(f"{'Anodic' if anodic else 'Cathodic'} Tafel region found: min_size={min_size}, min_decades={min_decades}, r2_threshold={r2_threshold:.3f}")
+            return idx, min_size, r2_threshold, min_decades
+    st.warning(f"No {'anodic' if anodic else 'cathodic'} Tafel region found even after relaxing criteria. Try reviewing your data!")
+    return np.array([], dtype=int), None, None, None
+
 def get_tafel_fit_deviation(E, i_meas, idx_fit, direction="right", deviation=0.10):
     if len(idx_fit) < 2:
         return None
@@ -246,21 +264,12 @@ if data_file is not None:
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # Tafel regions
-    anodic_idx = longest_linear_tafel_region(
-        E, i_meas, Ecorr_guess, anodic=True, min_size=6, r2_threshold=0.995, min_decades=1.0
-    )
-    cathodic_idx = longest_linear_tafel_region(
-        E, i_meas, Ecorr_guess, anodic=False, min_size=6, r2_threshold=0.995, min_decades=1.0
-    )
+    # Adaptive Tafel region detection!
+    anodic_idx, anodic_min_size, anodic_r2, anodic_ndec = adaptive_tafel_region(E, i_meas, Ecorr_guess, anodic=True)
+    cathodic_idx, cathodic_min_size, cathodic_r2, cathodic_ndec = adaptive_tafel_region(E, i_meas, Ecorr_guess, anodic=False)
 
     anodic_found = len(anodic_idx) > 0
     cathodic_found = len(cathodic_idx) > 0
-
-    if not anodic_found:
-        st.warning("No anodic Tafel region found (try less stringent min_size, min_decades, or r2_threshold).")
-    if not cathodic_found:
-        st.warning("No cathodic Tafel region found (try less stringent min_size, min_decades, or r2_threshold).")
 
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if anodic_found else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if cathodic_found else (None, None)
@@ -344,7 +353,8 @@ if data_file is not None:
 
     st.info(
         "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Yellow=Anodic diffusion-limited, Green=Cathodic diffusion-limited, Magenta=Ecorr region.\n"
-        "The longest contiguous, high-linearity region (≥1 decade, R²>0.995) is used for each Tafel slope. The diffusion onset (anodic) is marked by orange dashed line (>10% deviation)."
+        "The Tafel region finder automatically relaxes its threshold and reports optimal parameters when needed.\n"
+        "The longest contiguous, high-linearity region is used for each Tafel slope. The diffusion onset (anodic) is marked by orange dashed line (>10% deviation)."
     )
 
     # --- Export parameters as CSV ---
@@ -367,6 +377,12 @@ if data_file is not None:
         'Tafel linear cathodic E_end (V)': [cathodic_bounds[1]],
         'Anodic diffusion-limited region start (V)': [anodic_diff_bounds[0]],
         'Anodic diffusion-limited region end (V)': [anodic_diff_bounds[1]],
+        'Anodic region min_size': [anodic_min_size],
+        'Anodic region r2_threshold': [anodic_r2],
+        'Anodic region min_decades': [anodic_ndec],
+        'Cathodic region min_size': [cathodic_min_size],
+        'Cathodic region r2_threshold': [cathodic_r2],
+        'Cathodic region min_decades': [cathodic_ndec],
     }
     params_df = pd.DataFrame(param_dict)
     csv_bytes = params_df.to_csv(index=False).encode()
