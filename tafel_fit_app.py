@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.interpolate import UnivariateSpline
 from scipy.stats import linregress
-import io
 
 st.set_page_config(page_title="Global Implicit Tafel Fit", layout="wide")
 
@@ -78,7 +77,6 @@ def downsample(E, I, n_points=100):
     return E[idx], I[idx]
 
 def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995, min_decades=1.0):
-    # Finds the longest region where the log current is linear vs. E, spans at least min_decades, and R2 > r2_threshold
     if anodic:
         mask = (E > Ecorr) & (i_meas > 0)
     else:
@@ -92,6 +90,7 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
             if len(idx_window) < min_size:
                 continue
             logi = np.log10(np.abs(i_meas[idx_window]) + 1e-15)
+            # Must span at least min_decades in log(i)
             if np.ptp(logi) < min_decades:
                 continue
             fit = linregress(E[idx_window], logi)
@@ -108,7 +107,7 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
         return np.array([], dtype=int)
 
 def get_tafel_fit_deviation(E, i_meas, idx_fit, direction="right", deviation=0.10):
-    # Given a linear fit window, find where the deviation from the linear fit exceeds threshold
+    # Where (after the linear fit region) does |i_meas - i_fit|/|i_fit| exceed deviation?
     if len(idx_fit) < 2:
         return None
     E_fit = E[idx_fit]
@@ -117,7 +116,6 @@ def get_tafel_fit_deviation(E, i_meas, idx_fit, direction="right", deviation=0.1
     predicted = fit.intercept + fit.slope * E
     logi_meas = np.log10(np.abs(i_meas) + 1e-15)
     errors = np.abs(10 ** logi_meas - 10 ** predicted) / np.maximum(np.abs(10 ** predicted), 1e-30)
-    # On the anodic branch, we look to *higher* potentials than end of fit, cathodic to *lower*
     last_idx = idx_fit[-1] if direction == "right" else idx_fit[0]
     search_range = range(last_idx + 1, len(E)) if direction == "right" else range(last_idx - 1, -1, -1)
     for i in search_range:
@@ -262,7 +260,7 @@ if data_file is not None:
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx) > 0 else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx) > 0 else (None, None)
 
-    # Find where the diffusion region starts on anodic branch (where deviation >10% from linear fit)
+    # Find where the diffusion region starts on anodic branch (>10% deviation from linear fit)
     anode_diff_start = get_tafel_fit_deviation(E, i_meas, anodic_idx, direction="right", deviation=0.10) if len(anodic_idx) > 0 else None
 
     # Diffusion-limited (green, only for cathodic branch; for anodic: mark start by deviation)
@@ -332,8 +330,7 @@ if data_file is not None:
 
     st.info(
         "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Green=Diffusion-limited, Magenta=Ecorr region.\n"
-        "The longest contiguous, high-linearity region (≥1 decade, R²>0.995) is used for each Tafel slope. The diffusion onset (anodic) is marked by green dashed line (>10% deviation from Tafel fit).\n"
-        "At the bottom: raw Tafel plot for visual checking of your uploaded data."
+        "The longest contiguous, high-linearity region (≥1 decade, R²>0.995) is used for each Tafel slope. The diffusion onset (anodic) is marked by green dashed line (>10% deviation from Tafel fit)."
     )
 
     # --- Export parameters as CSV ---
