@@ -267,14 +267,13 @@ if data_file is not None:
     # Adaptive Tafel region detection for BOTH branches
     anodic_idx, anodic_min_size, anodic_r2, anodic_ndec = adaptive_tafel_region(E, i_meas, Ecorr_guess, anodic=True)
     cathodic_idx, cathodic_min_size, cathodic_r2, cathodic_ndec = adaptive_tafel_region(E, i_meas, Ecorr_guess, anodic=False)
-
     anodic_found = len(anodic_idx) > 0
     cathodic_found = len(cathodic_idx) > 0
 
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if anodic_found else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if cathodic_found else (None, None)
 
-    # Find where the diffusion region starts on anodic branch (>10% deviation from linear fit)
+    # Find where the deviation (>10%) starts on anodic branch
     anode_diff_start = get_tafel_fit_deviation(E, i_meas, anodic_idx, direction="right", deviation=0.10) if anodic_found else None
     anodic_diff_bounds = (None, None)
     if anodic_found and anode_diff_start is not None:
@@ -346,8 +345,8 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel, Yellow = Anodic diffusion-limited (>10% deviation after Tafel region), Magenta = Ecorr. "
-        "The Tafel region finder automatically adapts. The diffusion region starts where the data first departs the Tafel fit by >10%."
+        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel, Yellow = Anodic diffusion-limited (starts at >10% deviation after Tafel region), Magenta = Ecorr.\n"
+        "Tafel region and deviation detected adaptively. The diffusion region starts where the curve first clearly departs (>10%) from the Tafel fit."
     )
 
     # --- Export parameters as CSV ---
