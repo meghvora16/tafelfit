@@ -160,10 +160,12 @@ if data_file is not None:
     # -------- REGION DEFINITION BASED ON LOG(|i|) --------
     logi = np.log10(np.abs(i_meas) + 1e-15)
     anodic_mask = (E > Ecorr_guess) & (i_meas > 0)
+    cathodic_mask = (E < Ecorr_guess) & (i_meas < 0)
 
     # Tafel: log(|i|) between -8 and -7
-    anodic_tafel_mask = anodic_mask & (logi > -8) & (logi <= -7)  # from 1e-8 to 1e-7
-    # Diffusion: log(|i|) > -7
+    anodic_tafel_mask = anodic_mask & (logi > -8) & (logi <= -7)
+    cathodic_tafel_mask = cathodic_mask & (logi > -8) & (logi <= -7)
+    # Anodic diffusion: log(|i|) > -7
     anodic_diff_mask = anodic_mask & (logi > -7)
 
     # Potential boundaries
@@ -179,6 +181,12 @@ if data_file is not None:
     else:
         anodic_diff_start_E = anodic_diff_end_E = None
 
+    if np.any(cathodic_tafel_mask):
+        cathodic_tafel_start_E = E[cathodic_tafel_mask][0]
+        cathodic_tafel_end_E = E[cathodic_tafel_mask][-1]
+    else:
+        cathodic_tafel_start_E = cathodic_tafel_end_E = None
+
     # Ecorr (magenta)
     ecorr_window = 0.03
     ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
@@ -186,12 +194,10 @@ if data_file is not None:
     # --- Main plot: |i| vs E with shaded regions
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.14, label="Ecorr region")
-
-    # Shade anodic Tafel region
+    if cathodic_tafel_start_E is not None and cathodic_tafel_end_E is not None:
+        ax.axvspan(cathodic_tafel_start_E, cathodic_tafel_end_E, color='blue', alpha=0.14, label="Cathodic Tafel region")
     if anodic_tafel_start_E is not None and anodic_tafel_end_E is not None:
         ax.axvspan(anodic_tafel_start_E, anodic_tafel_end_E, color='red', alpha=0.14, label="Anodic Tafel region")
-
-    # Shade anodic diffusion region
     if anodic_diff_start_E is not None and anodic_diff_end_E is not None:
         ax.axvspan(anodic_diff_start_E, anodic_diff_end_E, color='yellow', alpha=0.24, label="Anodic diffusion-limited region")
         ax.axvline(anodic_diff_start_E, color='orange', linestyle='--', lw=2, label='Anodic diffusion start')
@@ -205,11 +211,20 @@ if data_file is not None:
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
 
-    # --- Log(|i|) plot to show regions ---
+    # --- Log(|i|) plot: show fit on anodic Tafel region ---
     fig2, ax2 = plt.subplots(figsize=(7, 5))
     ax2.plot(E, logi, "k.", label="log(|i|) data")
+    # Shade regions
+    if cathodic_tafel_start_E is not None and cathodic_tafel_end_E is not None:
+        ax2.axvspan(cathodic_tafel_start_E, cathodic_tafel_end_E, color='blue', alpha=0.14, label="Cathodic Tafel region")
     if anodic_tafel_start_E is not None and anodic_tafel_end_E is not None:
         ax2.axvspan(anodic_tafel_start_E, anodic_tafel_end_E, color='red', alpha=0.14, label="Anodic Tafel region")
+        # Linear fit
+        tafel_x = E[anodic_tafel_mask]
+        tafel_y = logi[anodic_tafel_mask]
+        if len(tafel_x) > 2:
+            slope, intercept, r, p, stderr = linregress(tafel_x, tafel_y)
+            ax2.plot(tafel_x, slope*tafel_x+intercept, "r--", linewidth=2, label="Anodic Tafel fit")
     if anodic_diff_start_E is not None and anodic_diff_end_E is not None:
         ax2.axvspan(anodic_diff_start_E, anodic_diff_end_E, color='yellow', alpha=0.24, label="Anodic diffusion-limited region")
         ax2.axvline(anodic_diff_start_E, color='orange', linestyle='--', lw=2, label='Anodic diffusion start')
@@ -220,7 +235,7 @@ if data_file is not None:
     ax2.legend(loc="lower right", fontsize=9)
     st.pyplot(fig2)
 
-    # --- Raw Tafel plot ---
+    # --- Raw Tafel plot: log(|i|) vs E (just data, no overlays) ---
     fig_raw, ax_raw = plt.subplots(figsize=(7, 5))
     ax_raw.plot(E, np.log10(np.abs(i_meas) + 1e-15), "ko", ms=4, label="Raw data")
     ax_raw.set_xlabel("Potential (V)")
@@ -231,7 +246,9 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
+        "Blue region: Cathodic Tafel region (1e-8 to 1e-7 A/cm²). "
         "Red region: Anodic Tafel region (1e-8 to 1e-7 A/cm²). "
         "Yellow region: Anodic diffusion-limited region (>1e-7 A/cm²). "
-        "Orange dashed line: Start of diffusion-limited region."
+        "Orange dashed line: Start of diffusion-limited region. \n"
+        "Dashed red line: Fit to anodic linear region."
     )
