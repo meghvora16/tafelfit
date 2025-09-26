@@ -150,7 +150,7 @@ if data_file is not None:
     i_corr = abs(newton_current_for_E(pars["Ecorr"], pars))
     st.write(f"β_a = {beta_a:.3f} V/dec, β_c = {beta_c:.3f} V/dec")
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
-    st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
+    #st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
     # Fit curve for main plot
     E_grid = np.linspace(E.min(), E.max(), 600)
