@@ -99,19 +99,38 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
         return np.array([], dtype=int)
 
 # --------- Plateau/region detection ---------
-def find_anodic_plateau(E, i_meas, Ecorr, slope_tol=0.04, r2_min=0.98, window_size=7):
-    # Only E > Ecorr, i > 0
+def anodic_diffusion_plateau_mask(E, i_meas, Ecorr, slope_tol=0.04, r2_min=0.98, window_size=7):
+    # Return mask array, True for anodic plateau region (flat region after Ecorr)
     mask = (E > Ecorr) & (i_meas > 0)
     indices = np.where(mask)[0]
     logi = np.log10(np.abs(i_meas) + 1e-15)
+    N = len(E)
+    plateau_mask = np.zeros(N, dtype=bool)
+    # 1. Find first plateau window after Ecorr
+    plateau_window_idxs = []
     for start in range(len(indices) - window_size + 1):
         idx = indices[start:start+window_size]
         xw = E[idx]
         yw = logi[idx]
         slope, intercept, r, p, stderr = linregress(xw, yw)
         if abs(slope) < slope_tol and r**2 > r2_min:
-            return idx
-    return np.array([], dtype=int)
+            plateau_window_idxs = list(idx)
+            break
+    if plateau_window_idxs:
+        # 2. Extend region as long as consecutive windows are still "plateau-like"
+        start_idx = plateau_window_idxs[0]
+        end_idx = plateau_window_idxs[-1]
+        for idx in range(end_idx + 1, N - window_size + 1):
+            this_idx = np.arange(idx, idx + window_size)
+            xw = E[this_idx]
+            yw = logi[this_idx]
+            slope, intercept, r, p, stderr = linregress(xw, yw)
+            if abs(slope) < slope_tol and r**2 > r2_min:
+                end_idx = idx + window_size - 1
+            else:
+                break
+        plateau_mask[start_idx:end_idx+1] = True
+    return plateau_mask
 
 data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
 plateau_slope_tol = st.slider("Log plateau slope (for diffusion plateau)", min_value=0.01, max_value=0.10, value=0.04, step=0.01)
@@ -207,13 +226,11 @@ if data_file is not None:
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx) > 0 else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx) > 0 else (None, None)
 
-    # Find anodic diffusion-limited plateau
-    plateau_idx = find_anodic_plateau(E, i_meas, Ecorr_guess, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=7)
-    if len(plateau_idx) > 0:
-        anodic_diff_start = E[plateau_idx[0]]
-        anodic_diff_end = E[plateau_idx[-1]]
-    else:
-        anodic_diff_start = anodic_diff_end = None
+    # Find anodic diffusion-limited plateau region using mask
+    plateau_mask = anodic_diffusion_plateau_mask(E, i_meas, Ecorr_guess, 
+        slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=7)
+    anodic_diff_start = E[np.flatnonzero(plateau_mask)[0]] if np.any(plateau_mask) else None
+    anodic_diff_end = E[np.flatnonzero(plateau_mask)[-1]] if np.any(plateau_mask) else None
 
     # Ecorr (magenta)
     ecorr_window = 0.03
@@ -269,5 +286,6 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Yellow=Anodic diffusion-limited (first detected plateau after Ecorr), Magenta=Ecorr region."
+        "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Yellow=Anodic diffusion-limited (first detected plateau after Ecorr), Magenta=Ecorr region. "
+        "You can tune the plateau detection using the sliders above."
     )
