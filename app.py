@@ -14,10 +14,8 @@ R = 8.314462618
 
 st.title("Global Implicit Tafel Fit")
 
-
 def beta_from_alpha(alpha, n=1, T=298.15):
     return 2.303 * R * T / (max(alpha, 1e-6) * n * F)
-
 
 def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
     try:
@@ -30,11 +28,9 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
         Ru = pars["Ru"]
     except KeyError:
         return np.nan
-
     i = 0.0 if i_init is None else float(i_init)
     k_a = (alpha_a * n * F) / (R * T)
     k_c = (alpha_c * n * F) / (R * T)
-
     for _ in range(10):
         try:
             eta = E - Ecorr - i * Ru
@@ -42,25 +38,21 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
             i_c_act = -i0_c * math.exp(-k_c * eta)
         except OverflowError:
             return np.nan
-
         denom = (i_c_act - iL)
         if abs(denom) < 1e-30:
             denom = 1e-30
         i_c = (i_c_act * -iL) / denom
         f = i - (i_a + i_c)
-
         di_a_deta = i_a * k_a
         di_cact_deta = (-i_c_act) * k_c
         di_c_dg = (iL ** 2) / (denom ** 2)
         di_c_deta = di_c_dg * di_cact_deta
         dfi = 1 - (di_a_deta + di_c_deta) * -Ru
-
         step = -f / (dfi + 1e-30)
         i += step * 0.5
         if abs(f) < 1e-12:
             break
     return i
-
 
 def simulate_curve(E_arr, pars, T=298.15, n=1):
     out = []
@@ -73,13 +65,11 @@ def simulate_curve(E_arr, pars, T=298.15, n=1):
         out.append(val)
     return np.array(out)
 
-
 def downsample(E, I, n_points=100):
     if len(E) <= n_points:
         return E, I
     idx = np.linspace(0, len(E) - 1, n_points, dtype=int)
     return E[idx], I[idx]
-
 
 def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995):
     if anodic:
@@ -108,8 +98,25 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     else:
         return np.array([], dtype=int)
 
+# --------- Plateau/region detection ---------
+def find_anodic_plateau(E, i_meas, Ecorr, slope_tol=0.04, r2_min=0.98, window_size=7):
+    # Only E > Ecorr, i > 0
+    mask = (E > Ecorr) & (i_meas > 0)
+    indices = np.where(mask)[0]
+    logi = np.log10(np.abs(i_meas) + 1e-15)
+    for start in range(len(indices) - window_size + 1):
+        idx = indices[start:start+window_size]
+        xw = E[idx]
+        yw = logi[idx]
+        slope, intercept, r, p, stderr = linregress(xw, yw)
+        if abs(slope) < slope_tol and r**2 > r2_min:
+            return idx
+    return np.array([], dtype=int)
 
-data_file = st.file_uploader("Upload polarization data (CSV/Excel).", type=["csv", "xlsx", "xls"])
+data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
+plateau_slope_tol = st.slider("Log plateau slope (for diffusion plateau)", min_value=0.01, max_value=0.10, value=0.04, step=0.01)
+r2_min = st.slider("Plateau min R²", min_value=0.95, max_value=0.999, value=0.98, step=0.001)
+
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
     st.success(f"Loaded {len(df)} rows.")
@@ -189,60 +196,25 @@ if data_file is not None:
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
-    # Corrosion rate
-    st.markdown("### Corrosion rate")
-    mode = st.radio("Material info:", ["I know V_m and z", "I don't know the material"], index=1, horizontal=True)
-    if mode == "I know V_m and z":
-        z = st.number_input("Valence z (electrons per metal atom)", value=2, min_value=1, step=1)
-        Vm = st.number_input("Molar volume V_m (cm³/mol)", value=7.09, min_value=0.0)
-        if np.isfinite(i_corr) and Vm > 0 and z > 0:
-            CR_mm_per_yr = 3270.0 * i_corr * Vm / z
-            st.write(f"Corrosion rate = **{CR_mm_per_yr:.3f} mm/year**  (V_m = {Vm:.3f} cm³/mol, z = {int(z)})")
-        else:
-            st.warning("Provide positive V_m and z to compute corrosion rate.")
-    else:
-        materials = {
-            "Steel-like (Fe)": (7.09, 2),
-            "Aluminum (Al)": (10.0, 3),
-            "Copper (Cu)": (7.11, 2),
-            "Nickel (Ni)": (6.59, 2),
-            "Zinc (Zn)": (9.16, 2),
-            "Titanium (Ti)": (10.64, 4),
-            "Magnesium (Mg)": (14.0, 2),
-        }
-        k_list = np.array([3.27e-3 * Vm / z for (Vm, z) in materials.values()])
-        k_med = float(np.median(k_list))
-        k_min = float(np.min(k_list))
-        k_max = float(np.max(k_list))
-        i_corr_uA = i_corr * 1e6
-        cr_est = k_med * i_corr_uA
-        cr_low = k_min * i_corr_uA
-        cr_high = k_max * i_corr_uA
-        st.write(f"Estimated corrosion rate = **{cr_est:.3f} mm/year**")
-        st.write(f"Typical range across common metals: **{cr_low:.3f} – {cr_high:.3f} mm/year**")
-        with st.expander("Assumptions and per-μA factors"):
-            for name, (Vm, z) in materials.items():
-                k = 3.27e-3 * Vm / z
-                st.write(f"- {name}: V_m={Vm} cm³/mol, z={z} → {k:.5f} mm/year per μA/cm²")
-        st.caption("Without material identity, this is a rough estimate; true CR depends on V_m and z.")
-
     # Fit curve for main plot
     E_grid = np.linspace(E.min(), E.max(), 600)
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # Find Tafel regions: longest linear region, each branch (publication standard)
+    # Find Tafel regions
     anodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=True, min_size=6, r2_threshold=0.995)
     cathodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=False, min_size=6, r2_threshold=0.995)
     anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx) > 0 else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx) > 0 else (None, None)
 
-    # Diffusion-limited (green)
-    diff_limit_thr = 0.20    # <---- Increase to 0.20 or more to include more plateau points
-    ilim = np.nanmin(i_meas)
-    mask_diff = (i_meas < 0) & (np.abs(i_meas - ilim) / np.abs(ilim) < diff_limit_thr) & (E < Ecorr_guess)
-    diff_indices = np.where(mask_diff)[0]
-    diff_bounds = (E[diff_indices[0]], E[diff_indices[-1]]) if len(diff_indices) > 0 else (None, None)
+    # Find anodic diffusion-limited plateau
+    plateau_idx = find_anodic_plateau(E, i_meas, Ecorr_guess, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=7)
+    if len(plateau_idx) > 0:
+        anodic_diff_start = E[plateau_idx[0]]
+        anodic_diff_end = E[plateau_idx[-1]]
+    else:
+        anodic_diff_start = anodic_diff_end = None
+
     # Ecorr (magenta)
     ecorr_window = 0.03
     ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
@@ -251,36 +223,34 @@ if data_file is not None:
     fig, ax = plt.subplots(figsize=(7, 5))
     if cathodic_bounds[0] is not None:
         ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
-    if diff_bounds[0] is not None:
-        ax.axvspan(diff_bounds[0], diff_bounds[1], color='green', alpha=0.12, label="Diffusion-limited branch")
     ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.14, label="Ecorr region")
     if anodic_bounds[0] is not None:
         ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
+    # Here is the anodic diffusion-limited region:
+    if anodic_diff_start is not None and anodic_diff_end is not None:
+        ax.axvspan(anodic_diff_start, anodic_diff_end, color='yellow', alpha=0.21, label="Anodic diffusion-limited")
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
+    if anodic_diff_start is not None:
+        ax.axvline(anodic_diff_start, color='orange', linestyle='--', lw=2, label='Anodic plateau start')
     ax.set_xlabel("Potential (V)")
     ax.set_ylabel(r"$|i|$ (A/cm²)")
     ax.grid(True, which="both")
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
 
-    # --- Log(|i|) vs E plot to show fitting windows ---
+    # --- Log(|i|) plot to show regions ---
     fig2, ax2 = plt.subplots(figsize=(7, 5))
     logi = np.log10(np.abs(i_meas) + 1e-15)
     ax2.plot(E, logi, "k.", label="log(|i|) data")
     if cathodic_bounds[0] is not None:
-        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel window")
-        fitE = E[cathodic_idx]
-        fitlogi = logi[cathodic_idx]
-        res = linregress(fitE, fitlogi)
-        ax2.plot(fitE, res.intercept + res.slope * fitE, color='blue', lw=2)
+        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15)
     if anodic_bounds[0] is not None:
-        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic Tafel window")
-        fitE = E[anodic_idx]
-        fitlogi = logi[anodic_idx]
-        res = linregress(fitE, fitlogi)
-        ax2.plot(fitE, res.intercept + res.slope * fitE, color='red', lw=2)
+        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14)
+    if anodic_diff_start is not None and anodic_diff_end is not None:
+        ax2.axvspan(anodic_diff_start, anodic_diff_end, color='yellow', alpha=0.21)
+        ax2.axvline(anodic_diff_start, color='orange', linestyle='--', lw=2, label='Anodic plateau start')
     ax2.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax2.set_xlabel("Potential (V)")
     ax2.set_ylabel("log |i| (A/cm²)")
@@ -299,7 +269,5 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Green=Diffusion-limited, Magenta=Ecorr region.\n"
-        "ONLY the longest contiguous, high-linearity region is used for Tafel slope reporting on each branch (see log(|i|) vs E plot above for the fit window).\n"
-        "At the bottom: raw Tafel plot for visual checking of your uploaded data."
+        "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Yellow=Anodic diffusion-limited (first detected plateau after Ecorr), Magenta=Ecorr region."
     )
