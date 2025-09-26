@@ -71,51 +71,7 @@ def downsample(E, I, n_points=100):
     idx = np.linspace(0, len(E) - 1, n_points, dtype=int)
     return E[idx], I[idx]
 
-def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_threshold=0.995):
-    if anodic:
-        mask = (E > Ecorr) & (i_meas > 0)
-    else:
-        mask = (E < Ecorr) & (i_meas < 0)
-    indices = np.where(mask)[0]
-    best_len = 0
-    best_seg = None
-    for start in range(len(indices)):
-        for end in range(start + min_size, len(indices) + 1):
-            idx_window = indices[start:end]
-            if len(idx_window) < min_size:
-                continue
-            logi = np.log10(np.abs(i_meas[idx_window]) + 1e-15)
-            fit = linregress(E[idx_window], logi)
-            fitvals = fit.intercept + fit.slope * E[idx_window]
-            ss_res = np.sum((logi - fitvals) ** 2)
-            ss_tot = np.sum((logi - np.mean(logi)) ** 2)
-            r2 = 1 - ss_res / ss_tot if ss_tot != 0 else 0
-            if r2 > r2_threshold and len(idx_window) > best_len:
-                best_len = len(idx_window)
-                best_seg = idx_window
-    if best_seg is not None:
-        return best_seg
-    else:
-        return np.array([], dtype=int)
-
-# --------- Plateau/region detection ---------
-def find_anodic_plateau(E, i_meas, Ecorr, slope_tol=0.04, r2_min=0.98, window_size=7):
-    # Only E > Ecorr, i > 0
-    mask = (E > Ecorr) & (i_meas > 0)
-    indices = np.where(mask)[0]
-    logi = np.log10(np.abs(i_meas) + 1e-15)
-    for start in range(len(indices) - window_size + 1):
-        idx = indices[start:start+window_size]
-        xw = E[idx]
-        yw = logi[idx]
-        slope, intercept, r, p, stderr = linregress(xw, yw)
-        if abs(slope) < slope_tol and r**2 > r2_min:
-            return idx
-    return np.array([], dtype=int)
-
 data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
-plateau_slope_tol = st.slider("Log plateau slope (for diffusion plateau)", min_value=0.01, max_value=0.10, value=0.04, step=0.01)
-r2_min = st.slider("Plateau min R²", min_value=0.95, max_value=0.999, value=0.98, step=0.001)
 
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
@@ -201,19 +157,27 @@ if data_file is not None:
     spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
     i_smooth = 10 ** spl(E_grid)
 
-    # Find Tafel regions
-    anodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=True, min_size=6, r2_threshold=0.995)
-    cathodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=False, min_size=6, r2_threshold=0.995)
-    anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if len(anodic_idx) > 0 else (None, None)
-    cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if len(cathodic_idx) > 0 else (None, None)
+    # -------- REGION DEFINITION BASED ON LOG(|i|) --------
+    logi = np.log10(np.abs(i_meas) + 1e-15)
+    anodic_mask = (E > Ecorr_guess) & (i_meas > 0)
 
-    # Find anodic diffusion-limited plateau
-    plateau_idx = find_anodic_plateau(E, i_meas, Ecorr_guess, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=7)
-    if len(plateau_idx) > 0:
-        anodic_diff_start = E[plateau_idx[0]]
-        anodic_diff_end = E[plateau_idx[-1]]
+    # Tafel: log(|i|) between -8 and -7
+    anodic_tafel_mask = anodic_mask & (logi > -8) & (logi <= -7)  # from 1e-8 to 1e-7
+    # Diffusion: log(|i|) > -7
+    anodic_diff_mask = anodic_mask & (logi > -7)
+
+    # Potential boundaries
+    if np.any(anodic_tafel_mask):
+        anodic_tafel_start_E = E[anodic_tafel_mask][0]
+        anodic_tafel_end_E = E[anodic_tafel_mask][-1]
     else:
-        anodic_diff_start = anodic_diff_end = None
+        anodic_tafel_start_E = anodic_tafel_end_E = None
+
+    if np.any(anodic_diff_mask):
+        anodic_diff_start_E = E[anodic_diff_mask][0]
+        anodic_diff_end_E = E[anodic_diff_mask][-1]
+    else:
+        anodic_diff_start_E = anodic_diff_end_E = None
 
     # Ecorr (magenta)
     ecorr_window = 0.03
@@ -221,19 +185,20 @@ if data_file is not None:
 
     # --- Main plot: |i| vs E with shaded regions
     fig, ax = plt.subplots(figsize=(7, 5))
-    if cathodic_bounds[0] is not None:
-        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
     ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.14, label="Ecorr region")
-    if anodic_bounds[0] is not None:
-        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
-    # Here is the anodic diffusion-limited region:
-    if anodic_diff_start is not None and anodic_diff_end is not None:
-        ax.axvspan(anodic_diff_start, anodic_diff_end, color='yellow', alpha=0.21, label="Anodic diffusion-limited")
+
+    # Shade anodic Tafel region
+    if anodic_tafel_start_E is not None and anodic_tafel_end_E is not None:
+        ax.axvspan(anodic_tafel_start_E, anodic_tafel_end_E, color='red', alpha=0.14, label="Anodic Tafel region")
+
+    # Shade anodic diffusion region
+    if anodic_diff_start_E is not None and anodic_diff_end_E is not None:
+        ax.axvspan(anodic_diff_start_E, anodic_diff_end_E, color='yellow', alpha=0.24, label="Anodic diffusion-limited region")
+        ax.axvline(anodic_diff_start_E, color='orange', linestyle='--', lw=2, label='Anodic diffusion start')
+
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
-    if anodic_diff_start is not None:
-        ax.axvline(anodic_diff_start, color='orange', linestyle='--', lw=2, label='Anodic plateau start')
     ax.set_xlabel("Potential (V)")
     ax.set_ylabel(r"$|i|$ (A/cm²)")
     ax.grid(True, which="both")
@@ -242,15 +207,12 @@ if data_file is not None:
 
     # --- Log(|i|) plot to show regions ---
     fig2, ax2 = plt.subplots(figsize=(7, 5))
-    logi = np.log10(np.abs(i_meas) + 1e-15)
     ax2.plot(E, logi, "k.", label="log(|i|) data")
-    if cathodic_bounds[0] is not None:
-        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15)
-    if anodic_bounds[0] is not None:
-        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14)
-    if anodic_diff_start is not None and anodic_diff_end is not None:
-        ax2.axvspan(anodic_diff_start, anodic_diff_end, color='yellow', alpha=0.21)
-        ax2.axvline(anodic_diff_start, color='orange', linestyle='--', lw=2, label='Anodic plateau start')
+    if anodic_tafel_start_E is not None and anodic_tafel_end_E is not None:
+        ax2.axvspan(anodic_tafel_start_E, anodic_tafel_end_E, color='red', alpha=0.14, label="Anodic Tafel region")
+    if anodic_diff_start_E is not None and anodic_diff_end_E is not None:
+        ax2.axvspan(anodic_diff_start_E, anodic_diff_end_E, color='yellow', alpha=0.24, label="Anodic diffusion-limited region")
+        ax2.axvline(anodic_diff_start_E, color='orange', linestyle='--', lw=2, label='Anodic diffusion start')
     ax2.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax2.set_xlabel("Potential (V)")
     ax2.set_ylabel("log |i| (A/cm²)")
@@ -258,7 +220,7 @@ if data_file is not None:
     ax2.legend(loc="lower right", fontsize=9)
     st.pyplot(fig2)
 
-    # --- Raw Tafel plot: log(|i|) vs E (just data, no overlays) ---
+    # --- Raw Tafel plot ---
     fig_raw, ax_raw = plt.subplots(figsize=(7, 5))
     ax_raw.plot(E, np.log10(np.abs(i_meas) + 1e-15), "ko", ms=4, label="Raw data")
     ax_raw.set_xlabel("Potential (V)")
@@ -269,5 +231,7 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Shaded regions: Red=Anodic Tafel, Blue=Cathodic Tafel, Yellow=Anodic diffusion-limited (first detected plateau after Ecorr), Magenta=Ecorr region."
+        "Red region: Anodic Tafel region (1e-8 to 1e-7 A/cm²). "
+        "Yellow region: Anodic diffusion-limited region (>1e-7 A/cm²). "
+        "Orange dashed line: Start of diffusion-limited region."
     )
