@@ -3,71 +3,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-from scipy.optimize import least_squares
-from scipy.interpolate import UnivariateSpline
 from scipy.stats import linregress
 
-st.set_page_config(page_title="Global Implicit Tafel Fit", layout="wide")
-
-F = 96485.33212
-R = 8.314462618
-
-def beta_from_alpha(alpha, n=1, T=298.15):
-    return 2.303 * R * T / (max(alpha, 1e-6) * n * F)
-
-def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
-    try:
-        i0_a = pars["i0_a"]
-        alpha_a = pars["alpha_a"]
-        i0_c = pars["i0_c"]
-        alpha_c = pars["alpha_c"]
-        iL = pars["iL"]
-        Ecorr = pars["Ecorr"]
-        Ru = pars["Ru"]
-    except KeyError:
-        return np.nan
-    i = 0.0 if i_init is None else float(i_init)
-    k_a = (alpha_a * n * F) / (R * T)
-    k_c = (alpha_c * n * F) / (R * T)
-    for _ in range(10):
-        try:
-            eta = E - Ecorr - i * Ru
-            i_a = i0_a * math.exp(k_a * eta)
-            i_c_act = -i0_c * math.exp(-k_c * eta)
-        except OverflowError:
-            return np.nan
-        denom = (i_c_act - iL)
-        if abs(denom) < 1e-30:
-            denom = 1e-30
-        i_c = (i_c_act * -iL) / denom
-        f = i - (i_a + i_c)
-        di_a_deta = i_a * k_a
-        di_cact_deta = (-i_c_act) * k_c
-        di_c_dg = (iL ** 2) / (denom ** 2)
-        di_c_deta = di_c_dg * di_cact_deta
-        dfi = 1 - (di_a_deta + di_c_deta) * -Ru
-        step = -f / (dfi + 1e-30)
-        i += step * 0.5
-        if abs(f) < 1e-12:
-            break
-    return i
-
-def simulate_curve(E_arr, pars, T=298.15, n=1):
-    out = []
-    i_guess = 0.0
-    for E in E_arr:
-        val = newton_current_for_E(E, pars, T=T, n=n, i_init=i_guess)
-        if not np.isfinite(val):
-            val = np.nan
-        i_guess = val if np.isfinite(val) else 0.0
-        out.append(val)
-    return np.array(out)
-
-def downsample(E, I, n_points=100):
-    if len(E) <= n_points:
-        return E, I
-    idx = np.linspace(0, len(E) - 1, n_points, dtype=int)
-    return E[idx], I[idx]
+st.set_page_config(page_title="Tafel Region Classifier", layout="wide")
 
 def find_plateau_mask(E, i_meas, Ecorr, anodic=True, slope_tol=0.04, r2_min=0.98, window_size=7):
     """Returns Boolean mask for plateau (diffusion) region on either side of Ecorr."""
@@ -99,8 +37,6 @@ def find_plateau_mask(E, i_meas, Ecorr, anodic=True, slope_tol=0.04, r2_min=0.98
         plateau_mask = np.zeros(N, dtype=bool)
         plateau_mask[:chosen_window[-1]+1] = True
         return plateau_mask
-
-# ----- Streamlit UI -----
 
 st.title("Classify plot regions")
 
@@ -141,22 +77,21 @@ if data_file is not None:
         Ecorr_guess = E[j] - i_meas[j] * (E[j + 1] - E[j]) / (i_meas[j + 1] - i_meas[j])
     else:
         Ecorr_guess = E[np.argmin(np.abs(i_meas))]
-
     st.write(f"Data-driven Ecorr ≈ **{Ecorr_guess:.3f} V**")
 
     # Find diffusion (plateau) regions
-    anodic_diff_mask = find_plateau_mask(E, i_meas, Ecorr_guess, anodic=True, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=window_size)
-    cathodic_diff_mask = find_plateau_mask(E, i_meas, Ecorr_guess, anodic=False, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=window_size)
+    anodic_diff_mask = find_plateau_mask(E, i_meas, Ecorr_guess, anodic=True,
+                                         slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=window_size)
+    cathodic_diff_mask = find_plateau_mask(E, i_meas, Ecorr_guess, anodic=False,
+                                           slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=window_size)
 
-    # Assign regions according to rules
+    # Assign regions according to screenshot logic
     region_labels = np.full(len(E), "ignored", dtype=object)
     region_labels[anodic_diff_mask] = "anodic_diffusion"
     region_labels[cathodic_diff_mask] = "cathodic_diffusion"
     # Active regions: between two diffusion regions
-    # Anodic active: between Ecorr and start of anodic plateau
     anodic_active_mask = (~anodic_diff_mask) & (~cathodic_diff_mask) & (E > Ecorr_guess)
     region_labels[anodic_active_mask] = "anodic_active"
-    # Cathodic active: between end of cathodic plateau and Ecorr
     cathodic_active_mask = (~anodic_diff_mask) & (~cathodic_diff_mask) & (E < Ecorr_guess)
     region_labels[cathodic_active_mask] = "cathodic_active"
 
@@ -182,20 +117,22 @@ if data_file is not None:
         "cathodic_diffusion": "Cathodic diffusion region"
     }
 
-    # Plateau value for horizontal line (anodic diffusion region)
+    # Plateau value for horizontal line (anodic diffusion region if it exists, else cathodic)
     logi = np.log10(np.abs(i_meas) + 1e-15)
+    plateau_val = None
     if np.any(anodic_diff_mask):
         plateau_val = np.mean(logi[anodic_diff_mask])
+        plateau_x = E[anodic_diff_mask]
     elif np.any(cathodic_diff_mask):
         plateau_val = np.mean(logi[cathodic_diff_mask])
+        plateau_x = E[cathodic_diff_mask]
     else:
-        plateau_val = None
+        plateau_x = None
 
-    # Make plot and explanation side by side
+    # --- Plot and explanation ---
     colL, colR = st.columns([2,3])
     with colL:
         fig, ax = plt.subplots(figsize=(7, 5))
-        # Plot regions as colored points
         for region in color_map.keys():
             mask = (region_labels == region)
             if np.any(mask):
@@ -203,8 +140,7 @@ if data_file is not None:
                         marker_map[region], color=color_map[region],
                         label=label_map[region],
                         linestyle="None", markersize=6 if region != "ignored" else 2)
-        # Draw plateau line if found
-        if plateau_val is not None:
+        if plateau_val is not None and plateau_x is not None:
             ax.axhline(plateau_val, color="red", linestyle="--", label="plateau")
         ax.set_xlabel("E/V")
         ax.set_ylabel(r"log$_{10}$(|i|/A)")
@@ -213,25 +149,18 @@ if data_file is not None:
         st.pyplot(fig)
     with colR:
         st.markdown("""
-        ## Classify plot regions
+        # Classify plot regions
 
-        <span style="font-size:1.3em"><b>1</b></span> **Find plateaus**
-        
+        <div style="font-size:1.1em">
+        <span style="font-size:1.5em"><b>1</b></span> <b>Find plateaus</b>  
         Chunk the data into subsections and fit a line to each. We only accept close to horizontal lines that explain the surrounding measurements well.
-
-        <br>
-
-        <span style="font-size:1.3em"><b>2</b></span> **Define active and diffusion regions**
-        
-        The diffusion regions are the last plateau on the cathodic and first on the anodic side.
-        The active regions are measurements between the two diffusion regions.
-
-        <br>
-
-        <span style="font-size:1.3em"><b>3</b></span> **Remove tails**
-        
+        <br><br>
+        <span style="font-size:1.5em"><b>2</b></span> <b>Define active and diffusion regions</b>  
+        The diffusion regions are the last plateau on the cathodic and first on the anodic side. The active regions are measurements between the two diffusion regions.
+        <br><br>
+        <span style="font-size:1.5em"><b>3</b></span> <b>Remove tails</b>  
         Since our models do not explain anything beyond the diffusion regions, we drop all those measurements.
-
+        </div>
         """, unsafe_allow_html=True)
 
     st.info(
@@ -241,5 +170,5 @@ if data_file is not None:
         - Green = anodic diffusion region  
         - Maroon = cathodic diffusion region  
         - Gray = ignored  
-        - Red dashed line = detected plateau (mean log(|i|) in anodic diffusion region)
+        - Red dashed line = detected plateau (mean log(|i|) in plateau region)
         """)
