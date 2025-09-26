@@ -28,11 +28,9 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
         Ru = pars["Ru"]
     except KeyError:
         return np.nan
-
     i = 0.0 if i_init is None else float(i_init)
     k_a = (alpha_a * n * F) / (R * T)
     k_c = (alpha_c * n * F) / (R * T)
-
     for _ in range(10):
         try:
             eta = E - Ecorr - i * Ru
@@ -40,19 +38,16 @@ def newton_current_for_E(E, pars, T=298.15, n=1, i_init=None):
             i_c_act = -i0_c * math.exp(-k_c * eta)
         except OverflowError:
             return np.nan
-
         denom = (i_c_act - iL)
         if abs(denom) < 1e-30:
             denom = 1e-30
         i_c = (i_c_act * -iL) / denom
         f = i - (i_a + i_c)
-
         di_a_deta = i_a * k_a
         di_cact_deta = (-i_c_act) * k_c
         di_c_dg = (iL ** 2) / (denom ** 2)
         di_c_deta = di_c_dg * di_cact_deta
         dfi = 1 - (di_a_deta + di_c_deta) * -Ru
-
         step = -f / (dfi + 1e-30)
         i += step * 0.5
         if abs(f) < 1e-12:
@@ -105,9 +100,26 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=2, r2_th
     else:
         return np.array([], dtype=int)
 
+# --------- Plateau/region detection ---------
+def find_anodic_plateau(E, i_meas, Ecorr, slope_tol=0.03, r2_min=0.98, window_size=7):
+    # log(|i|) plateau search, for E > Ecorr
+    mask = (E > Ecorr) & (i_meas > 0)
+    indices = np.where(mask)[0]
+    logi = np.log10(np.abs(i_meas) + 1e-15)
+    for start in range(indices[0], indices[-1] - window_size + 2):
+        idx = np.arange(start, start + window_size)
+        xw = E[idx]
+        yw = logi[idx]
+        slope, intercept, r, p, stderr = linregress(xw, yw)
+        if abs(slope) < slope_tol and r**2 > r2_min:
+            return idx  # first plateau window
+    return np.array([], dtype=int)
+
+# ==== Streamlit UI ====
 data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
-deviation_thresh = st.slider("Deviation threshold for end of anodic Tafel region (log(|i|), e.g. 0.05 = ~10%)", min_value=0.02, max_value=0.17, value=0.07, step=0.01)
-min_decades = st.slider("Minimum Tafel window dynamic range (decades)", min_value=0.3, max_value=2.5, value=0.7, step=0.1)
+plateau_slope_tol = st.slider("Log plateau slope (for diffusion plateau)", min_value=0.01, max_value=0.10, value=0.03, step=0.01)
+r2_min = st.slider("Plateau min R²", min_value=0.95, max_value=0.999, value=0.98, step=0.001)
+min_decades = st.slider("Minimum Tafel window dynamic range (decades)", min_value=0.3, max_value=2.0, value=0.7, step=0.1)
 
 if data_file is not None:
     df = pd.read_csv(data_file) if data_file.name.endswith(".csv") else pd.read_excel(data_file)
@@ -146,10 +158,8 @@ if data_file is not None:
     # --- Global fit ---
     log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6, 0.5, -8, 0.5, -4, 0
     x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
-
     maskB = (E >= Ecorr_guess - 0.3) & (E <= Ecorr_guess + 0.3)
     E_B, i_B = downsample(E[maskB], i_meas[maskB], 120)
-
     def residuals_B(x):
         pars_local = {
             "i0_a": 10 ** x[0], "alpha_a": x[1],
@@ -163,7 +173,6 @@ if data_file is not None:
         r = (np.log10(np.abs(i_model[mask]) + eps) -
              np.log10(np.abs(i_B[mask]) + eps))
         return r
-
     resB = least_squares(
         residuals_B, x0,
         bounds=([-12, 0.3, -12, 0.3, -6, Ecorr_guess - 0.2, 0],
@@ -188,64 +197,48 @@ if data_file is not None:
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
-    # Curve fitting for main plot (with smoothing)
-    E_grid = np.linspace(E.min(), E.max(), 600)
-    spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
-    i_smooth = 10 ** spl(E_grid)
-
-    ### Find cathodic Tafel region in usual way (global longest linear window)
+    # --- Find cathodic linear region (unchanged) ---
     cathodic_idx = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=False, min_size=2, r2_threshold=0.97, min_decades=min_decades)
-
-    ### Find the anodic region, but truncate at local deviation
-    anodic_idx_init = longest_linear_tafel_region(E, i_meas, Ecorr_guess, anodic=True, min_size=2, r2_threshold=0.97, min_decades=min_decades)
-    if len(anodic_idx_init) < 2:
-        st.warning("No anodic Tafel region found.")
-        anodic_idx = []
-        anode_diff_start = None
-    else:
-        fit_x = E[anodic_idx_init]
-        fit_y = np.log10(np.abs(i_meas[anodic_idx_init]) + 1e-15)
-        fit = linregress(fit_x, fit_y)
-        new_idx = [anodic_idx_init[0]]
-        for idx in anodic_idx_init[1:]:
-            logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
-            fitval = fit.intercept + fit.slope * E[idx]
-            if abs(logi - fitval) > deviation_thresh:
-                break
-            new_idx.append(idx)
-        last_idx = new_idx[-1]
-        # Try to extend further if points still fit
-        for idx in range(last_idx+1, len(E)):
-            logi = np.log10(np.abs(i_meas[idx]) + 1e-15)
-            fitval = fit.intercept + fit.slope * E[idx]
-            if abs(logi - fitval) > deviation_thresh:
-                break
-            new_idx.append(idx)
-        anodic_idx = np.array(new_idx)
-        anode_diff_start = E[anodic_idx[-1]+1] if anodic_idx[-1]+1 < len(E) else None
-
-    anodic_found = len(anodic_idx) > 1
     cathodic_found = len(cathodic_idx) > 1
-
-    anodic_bounds = (E[anodic_idx[0]], E[anodic_idx[-1]]) if anodic_found else (None, None)
     cathodic_bounds = (E[cathodic_idx[0]], E[cathodic_idx[-1]]) if cathodic_found else (None, None)
-    anodic_diff_bounds = (anode_diff_start, E[-1]) if anode_diff_start is not None else (None, None)
 
+    # --- Find anodic diffusion plateau and Tafel region ---
+    plateau_idx = find_anodic_plateau(E, i_meas, Ecorr_guess, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=7)
+    if len(plateau_idx) > 0:
+        anodic_diff_start = E[plateau_idx[0]]
+    else:
+        anodic_diff_start = None
+    if anodic_diff_start is not None:
+        anodic_active_mask = (E > Ecorr_guess) & (E < anodic_diff_start) & (i_meas > 0)
+        anodic_tafel_idx = np.where(anodic_active_mask)[0]
+        anodic_diff_idx = np.arange(plateau_idx[0], plateau_idx[-1] + 1)
+        anodic_bounds = (E[anodic_tafel_idx[0]], E[anodic_tafel_idx[-1]]) if len(anodic_tafel_idx) > 1 else (None, None)
+        anodic_diff_bounds = (E[anodic_diff_idx[0]], E[anodic_diff_idx[-1]])
+    else:
+        anodic_tafel_idx = []
+        anodic_diff_idx = []
+        anodic_bounds = (None, None)
+        anodic_diff_bounds = (None, None)
+
+    # --- Ecorr region ---
     ecorr_window = 0.03
     ecorr_bounds = (Ecorr_guess - ecorr_window, Ecorr_guess + ecorr_window)
 
-    # Main plot
+    # --- Main plot ---
     fig, ax = plt.subplots(figsize=(7, 5))
     if cathodic_found and cathodic_bounds[0] is not None and cathodic_bounds[1] is not None:
-        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel region")
-    if anodic_found and anodic_bounds[0] is not None and anodic_bounds[1] is not None:
-        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.14, label="Anodic Tafel region")
+        ax.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.13, label="Cathodic Tafel region")
+    if anodic_bounds[0] is not None and anodic_bounds[1] is not None:
+        ax.axvspan(anodic_bounds[0], anodic_bounds[1], color='orange', alpha=0.18, label="Anodic active region")
     if anodic_diff_bounds[0] is not None and anodic_diff_bounds[1] is not None:
-        ax.axvspan(anodic_diff_bounds[0], anodic_diff_bounds[1], color='yellow', alpha=0.15, label="Anodic diffusion-limited")
-    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.12, label="Ecorr region")
-    if anode_diff_start is not None:
-        ax.axvline(anode_diff_start, color='orange', lw=2, linestyle='--', label='Start of anodic diffusion-limited')
+        ax.axvspan(anodic_diff_bounds[0], anodic_diff_bounds[1], color='green', alpha=0.18, label="Anodic diffusion region")
+    ax.axvspan(*ecorr_bounds, color='magenta', alpha=0.15, label="Ecorr region")
+    if anodic_diff_start is not None:
+        ax.axvline(anodic_diff_start, color='r', lw=1.5, linestyle='--', label='Anodic plateau start')
     ax.semilogy(E, np.abs(i_meas), "k.", label="Data")
+    E_grid = np.linspace(E.min(), E.max(), 600)
+    spl = UnivariateSpline(E, np.log10(np.abs(i_meas) + 1e-12), s=0.001)
+    i_smooth = 10 ** spl(E_grid)
     ax.semilogy(E_grid, i_smooth, "r-", label="Fit")
     ax.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax.set_xlabel("Potential (V)")
@@ -254,24 +247,18 @@ if data_file is not None:
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
 
-    # Log(|i|) plots for fit windows
+    # --- log(|i|) region coloring ---
     fig2, ax2 = plt.subplots(figsize=(7, 5))
     logi = np.log10(np.abs(i_meas) + 1e-15)
     ax2.plot(E, logi, "k.", label="log(|i|) data")
     if cathodic_found and cathodic_bounds[0] is not None and cathodic_bounds[1] is not None:
-        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.15, label="Cathodic Tafel window")
-        fitE_c = E[cathodic_idx]
-        fitlogi_c = logi[cathodic_idx]
-        res_c = linregress(fitE_c, fitlogi_c)
-        ax2.plot(fitE_c, res_c.intercept + res_c.slope * fitE_c, color='blue', lw=2)
-    if anodic_found and anodic_bounds[0] is not None and anodic_bounds[1] is not None:
-        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='red', alpha=0.15, label="Anodic Tafel window")
-        fitE_a = E[anodic_idx]
-        fitlogi_a = logi[anodic_idx]
-        res_a = linregress(fitE_a, fitlogi_a)
-        ax2.plot(fitE_a, res_a.intercept + res_a.slope * fitE_a, color='red', lw=2)
-    if anode_diff_start is not None:
-        ax2.axvline(anode_diff_start, color='orange', lw=2, linestyle='--', label='Start of anodic diffusion-limited')
+        ax2.axvspan(cathodic_bounds[0], cathodic_bounds[1], color='blue', alpha=0.13)
+    if anodic_bounds[0] is not None and anodic_bounds[1] is not None:
+        ax2.axvspan(anodic_bounds[0], anodic_bounds[1], color='orange', alpha=0.18)
+    if anodic_diff_bounds[0] is not None and anodic_diff_bounds[1] is not None:
+        ax2.axvspan(anodic_diff_bounds[0], anodic_diff_bounds[1], color='green', alpha=0.17)
+    if anodic_diff_start is not None:
+        ax2.axvline(anodic_diff_start, color='r', lw=1.5, linestyle='--')
     ax2.axvline(Ecorr_guess, color="blue", linestyle="--", label="Ecorr")
     ax2.set_xlabel("Potential (V)")
     ax2.set_ylabel("log |i| (A/cm²)")
@@ -279,48 +266,8 @@ if data_file is not None:
     ax2.legend(loc="lower right", fontsize=9)
     st.pyplot(fig2)
 
-    # Raw plot
-    fig_raw, ax_raw = plt.subplots(figsize=(7, 5))
-    ax_raw.plot(E, np.log10(np.abs(i_meas) + 1e-15), "ko", ms=4, label="Raw data")
-    ax_raw.set_xlabel("Potential (V)")
-    ax_raw.set_ylabel("log |i| (A/cm²)")
-    ax_raw.grid(True, which="both")
-    ax_raw.legend(loc="best")
-    ax_raw.set_title("Raw Tafel Plot: log(|i|) vs. Potential")
-    st.pyplot(fig_raw)
-
+    # --- Info ---
     st.info(
-        "Shaded regions: Blue = Cathodic Tafel, Red = Anodic Tafel (ends on local deviation!), Yellow = Anodic diffusion-limited (starts at deviation after Tafel region), Magenta = Ecorr.\n"
-        f"Minimum Tafel region dynamic range: {min_decades} decades. Deviation threshold: {deviation_thresh:.3f} log(|i|) units (~{100.*deviation_thresh:.0f}% diff)."
-    )
-
-    # Export CSV
-    param_dict = {
-        'i0_a (A/cm²)': [pars["i0_a"]],
-        'alpha_a': [pars["alpha_a"]],
-        'i0_c (A/cm²)': [pars["i0_c"]],
-        'alpha_c': [pars["alpha_c"]],
-        'iL (A/cm²)': [pars["iL"]],
-        'Ecorr (V)': [pars["Ecorr"]],
-        'Ru (ohm·cm²)': [pars["Ru"]],
-        'beta_a (V/decade)': [beta_a],
-        'beta_c (V/decade)': [beta_c],
-        'i_corr (A/cm²)': [i_corr],
-        'Tafel linear anodic E_start (V)': [anodic_bounds[0]],
-        'Tafel linear anodic E_end (V)': [anodic_bounds[1]],
-        'Diffusion onset anodic (V)': [anode_diff_start],
-        'Anodic diffusion-limited region start (V)': [anodic_diff_bounds[0]],
-        'Anodic diffusion-limited region end (V)': [anodic_diff_bounds[1]],
-        'Tafel linear cathodic E_start (V)': [cathodic_bounds[0]],
-        'Tafel linear cathodic E_end (V)': [cathodic_bounds[1]],
-        'Minimum Tafel region log decades': [min_decades],
-        'Deviation threshold log(|i|)': [deviation_thresh],
-    }
-    params_df = pd.DataFrame(param_dict)
-    csv_bytes = params_df.to_csv(index=False).encode()
-    st.download_button(
-        "Download Fit Parameters (CSV)",
-        data=csv_bytes,
-        file_name="tafel_fit_parameters.csv",
-        mime="text/csv"
+        "On the anodic branch: Green = diffusion-limited (plateau, auto-detected), Orange = activation/Tafel region (before plateau), Blue = cathodic Tafel. "
+        "Tune 'log plateau slope' and min R² sliders to adjust detection: a lower plateau slope catches more shallow plateaus."
     )
