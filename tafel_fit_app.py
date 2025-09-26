@@ -211,15 +211,20 @@ if data_file is not None:
     ax.legend(loc="lower right", fontsize=9)
     st.pyplot(fig)
 
-    # --- Log(|i|) plot: show fit on anodic Tafel region ---
+    # --- Log(|i|) plot: show fits on both Tafel regions ---
     fig2, ax2 = plt.subplots(figsize=(7, 5))
     ax2.plot(E, logi, "k.", label="log(|i|) data")
-    # Shade regions
     if cathodic_tafel_start_E is not None and cathodic_tafel_end_E is not None:
         ax2.axvspan(cathodic_tafel_start_E, cathodic_tafel_end_E, color='blue', alpha=0.14, label="Cathodic Tafel region")
+        # Linear fit for cathodic region
+        tafel_x_c = E[cathodic_tafel_mask]
+        tafel_y_c = logi[cathodic_tafel_mask]
+        if len(tafel_x_c) > 2:
+            slope_c, intercept_c, r_c, p_c, stderr_c = linregress(tafel_x_c, tafel_y_c)
+            ax2.plot(tafel_x_c, slope_c*tafel_x_c+intercept_c, "b--", linewidth=2, label="Cathodic Tafel fit")
     if anodic_tafel_start_E is not None and anodic_tafel_end_E is not None:
         ax2.axvspan(anodic_tafel_start_E, anodic_tafel_end_E, color='red', alpha=0.14, label="Anodic Tafel region")
-        # Linear fit
+        # Linear fit for anodic region
         tafel_x = E[anodic_tafel_mask]
         tafel_y = logi[anodic_tafel_mask]
         if len(tafel_x) > 2:
@@ -248,7 +253,7 @@ if data_file is not None:
     st.info(
         "Blue region: Cathodic Tafel region (1e-8 to 1e-7 A/cm²). "
         "Red region: Anodic Tafel region (1e-8 to 1e-7 A/cm²). "
+        "Dashed blue/red lines: Tafel fits."
         "Yellow region: Anodic diffusion-limited region (>1e-7 A/cm²). "
-        "Orange dashed line: Start of diffusion-limited region. \n"
-        "Dashed red line: Fit to anodic linear region."
+        "Orange dashed line: Start of diffusion-limited region."
     )
