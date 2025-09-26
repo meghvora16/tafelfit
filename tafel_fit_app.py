@@ -97,12 +97,10 @@ def longest_linear_tafel_region(E, i_meas, Ecorr, anodic=True, min_size=6, r2_th
     else:
         return np.array([], dtype=int)
 
-# --------- Robust adaptive plateau region detection (never fails) ---------
+# --------- Detect plateau region: returns mask and True if strict plateau criteria were met ---------
 def diffusion_plateau_mask(E, i_meas, Ecorr, anodic=True, slope_tol=0.04, r2_min=0.98, window_size=7):
     """
-    Returns boolean mask for diffusion plateau region selected automatically,
-    or the most horizontal segment if strict criteria fail.
-    Also returns whether strict plateau was found.
+    Returns boolean mask for plateau region ONLY if strict criteria are met, else all False.
     """
     if anodic:
         mask = (E > Ecorr) & (i_meas > 0)
@@ -111,8 +109,6 @@ def diffusion_plateau_mask(E, i_meas, Ecorr, anodic=True, slope_tol=0.04, r2_min
     indices = np.where(mask)[0]
     logi = np.log10(np.abs(i_meas) + 1e-15)
     N = len(E)
-    best_window = None
-    best_slope = np.inf
     plateau_windows = []
     for start in range(len(indices) - window_size + 1):
         idx = indices[start:start+window_size]
@@ -121,25 +117,16 @@ def diffusion_plateau_mask(E, i_meas, Ecorr, anodic=True, slope_tol=0.04, r2_min
         slope, intercept, r, p, stderr = linregress(xw, yw)
         if abs(slope) < slope_tol and r**2 > r2_min:
             plateau_windows.append(idx)
-        if abs(slope) < abs(best_slope):
-            best_slope = slope
-            best_window = idx
     plateau_mask = np.zeros(N, dtype=bool)
-    used_strict = False
+    found_strict = False
     if plateau_windows:
         idx_use = plateau_windows[-1] if anodic else plateau_windows[0]
         if anodic:
             plateau_mask[idx_use[0]:] = True
         else:
             plateau_mask[:idx_use[-1]+1] = True
-        used_strict = True
-    elif best_window is not None:
-        if anodic:
-            plateau_mask[best_window[0]:] = True
-        else:
-            plateau_mask[:best_window[-1]+1] = True
-        used_strict = False
-    return plateau_mask, used_strict
+        found_strict = True
+    return plateau_mask, found_strict
 
 # --------- UI ---------
 data_file = st.file_uploader("Upload polarization data (CSV/Excel)", type=["csv", "xlsx", "xls"])
@@ -181,7 +168,7 @@ if data_file is not None:
         Ecorr_guess = E[np.argmin(np.abs(i_meas))]
     st.write(f"Data-driven Ecorr ≈ **{Ecorr_guess:.3f} V**")
 
-    # ---- Fit & simulated curve (as in your code, not changed) ----
+    # ---- Fit ----
     log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ru_guess = -6, 0.5, -8, 0.5, -4, 0
     x0 = np.array([log_i0a, alpha_a, log_i0c, alpha_c, log_iL, Ecorr_guess, Ru_guess])
     maskB = (E >= Ecorr_guess - 0.3) & (E <= Ecorr_guess + 0.3)
@@ -222,7 +209,7 @@ if data_file is not None:
     st.write(f"i_corr = {i_corr:.3e} A/cm²")
     st.write(f"Fitted Ecorr = **{pars['Ecorr']:.3f} V** (data-driven guess: {Ecorr_guess:.3f} V)")
 
-    # --------- Automated region detection ---------
+    # --------- Region detection ----------
     anodic_diff_mask, found_anodic = diffusion_plateau_mask(E, i_meas, Ecorr_guess,
         anodic=True, slope_tol=plateau_slope_tol, r2_min=r2_min, window_size=window_size)
     cathodic_diff_mask, found_cathodic = diffusion_plateau_mask(E, i_meas, Ecorr_guess,
@@ -237,25 +224,23 @@ if data_file is not None:
         anodic_plateau_end_E = E[np.where(anodic_diff_mask)[0][-1]]
     else:
         anodic_plateau_start_E = anodic_plateau_end_E = None
-    if np.any(cathodic_diff_mask):
+    if found_cathodic and np.any(cathodic_diff_mask):
         cathodic_plateau_start_E = E[np.where(cathodic_diff_mask)[0][0]]
         cathodic_plateau_end_E = E[np.where(cathodic_diff_mask)[0][-1]]
     else:
         cathodic_plateau_start_E = cathodic_plateau_end_E = None
 
-    # Warn if strict plateau not found
-    if not found_anodic:
-        st.warning("No strict anodic plateau detected; showing flattest segment (increase slope tolerance or reduce window size for broader detection).")
     if not found_cathodic:
-        st.warning("No strict cathodic plateau detected; showing flattest segment.")
+        st.info("No real cathodic plateau detected; none shown.")
 
     # --- Main plot: |i| vs E with shaded regions and plateau start ---
     fig, ax = plt.subplots(figsize=(7, 5))
-    # Diffusion regions
+    # Anodic diffusion region
     if anodic_plateau_start_E is not None and anodic_plateau_end_E is not None:
         ax.axvspan(anodic_plateau_start_E, anodic_plateau_end_E, color='yellow', alpha=0.25, label="Anodic diffusion region")
         ax.axvline(anodic_plateau_start_E, color='orange', lw=2, linestyle='--', label="Anodic plateau start")
-    if cathodic_plateau_start_E is not None and cathodic_plateau_end_E is not None:
+    # Cathodic diffusion region (only if found!)
+    if cathodic_plateau_start_E is not None and cathodic_plateau_end_E is not None and found_cathodic:
         ax.axvspan(cathodic_plateau_start_E, cathodic_plateau_end_E, color='yellow', alpha=0.25, label="Cathodic diffusion region")
         ax.axvline(cathodic_plateau_end_E, color='darkred', lw=2, linestyle='--', label="Cathodic plateau end")
     E_grid = np.linspace(E.min(), E.max(), 600)
@@ -279,7 +264,7 @@ if data_file is not None:
         ax2.plot(E[anodic_diff_mask], logi[anodic_diff_mask], "o", color="forestgreen", label="Anodic diffusion region", markersize=6)
         ax2.axhline(np.mean(logi[anodic_diff_mask]), color="red", linestyle="--", lw=2, label="Anodic plateau (mean)")
         ax2.axvline(anodic_plateau_start_E, color='orange', linestyle='--', lw=2, label="Anodic plateau start")
-    if np.any(cathodic_diff_mask):
+    if cathodic_plateau_start_E is not None and cathodic_plateau_end_E is not None and found_cathodic:
         ax2.plot(E[cathodic_diff_mask], logi[cathodic_diff_mask], "o", color="maroon", label="Cathodic diffusion region", markersize=6)
         ax2.axhline(np.mean(logi[cathodic_diff_mask]), color="navy", linestyle="--", lw=2, label="Cathodic plateau (mean)")
         ax2.axvline(cathodic_plateau_end_E, color='darkred', linestyle='--', lw=2, label="Cathodic plateau end")
@@ -300,7 +285,8 @@ if data_file is not None:
     st.pyplot(fig_raw)
 
     st.info(
-        "Yellow regions = diffusion plateau (automatically detected, never blank). "
-        "Orange dashed line = start of anodic plateau. If strict plateau not detected, the flattest segment is selected. "
-        "Tune sliders for best match."
+        "Yellow region = diffusion plateau (automatically detected and only shown if a true plateau is found). "
+        "Orange dashed line = start of anodic plateau. "
+        "No cathodic region shown unless a strict plateau is detected. "
+        "Tune sliders for best detection."
     )
