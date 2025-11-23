@@ -11,11 +11,11 @@ st.title("Passivation & Tafel Analysis")
 
 st.markdown("""
 **Methodology:**
-Instead of forcing a monolithic Butler-Volmer fit (which fails for passivation), this tool performs **Region-Based Characterization**:
-1.  **Active Region:** Fits the Tafel slope ($b_a$) before the peak.
-2.  **Passivation Peak:** Detects $E_{pp}$ (Primary Passivation Potential) and $i_{crit}$.
-3.  **Passive Region:** Identifies the passive current $i_{pass}$.
-4.  **Transpassive/Breakdown:** Detects where the current rises again ($E_{bd}$/Transpassive).
+This tool performs **Region-Based Characterization** rather than a single global fit:
+1.  **Active Region (Red Shade):** Area of active metal dissolution ($E_{corr} \to E_{pp}$).
+2.  **Tafel Fit:** Extracted from the linear portion *within* the active region.
+3.  **Passive Region (Green Shade):** Area where the oxide film protects the metal ($E_{pp} \to E_{bd}$).
+4.  **Breakdown:** Where the protective film fails ($E_{bd}$).
 """)
 
 # --- UTILS ---
@@ -70,7 +70,6 @@ if data_file is not None:
     E_corr, i_corr_raw, idx_corr = find_ecorr(E, i_meas)
     
     # 2. Split into Anodic and Cathodic
-    # We are mostly interested in Anodic for Passivation
     anodic_mask = E > E_corr
     E_anodic = E[anodic_mask]
     i_anodic = i_meas[anodic_mask]
@@ -79,33 +78,27 @@ if data_file is not None:
         st.error("Not enough data in the anodic branch to analyze passivation.")
         st.stop()
 
-    # Smooth the anodic current (log space is better for smoothing usually, but linear works for peak finding)
-    # However, for peak detection in passivation, linear current is safer to see the drop.
+    # Smooth the anodic current for peak detection
     i_anodic_smooth = smooth_curve(i_anodic, window_length=21)
 
     # 3. Detect Passivation Peak (E_pp, i_crit)
-    # Look for local maxima
     peaks_idx = argrelextrema(i_anodic_smooth, np.greater)[0]
     
-    # Filter peaks: Must be at least X% higher than the final current to be considered a "passivation" peak
-    # and must be somewhat close to Ecorr (active region)
     valid_peaks = []
     for p in peaks_idx:
-        if i_anodic_smooth[p] > 0: # Positive anodic current
+        if i_anodic_smooth[p] > 0: 
             valid_peaks.append(p)
             
     if not valid_peaks:
         st.warning("No clear anodic peak detected. Data might not show passivation.")
         E_pp, i_crit = None, None
     else:
-        # Assume the first major peak is the primary passivation potential
-        # Heuristic: The highest peak in the first half of the scan often corresponds to Active->Passive
+        # Heuristic: Highest peak in the anodic scan is usually E_pp
         best_p = valid_peaks[np.argmax(i_anodic_smooth[valid_peaks])] 
         E_pp = E_anodic[best_p]
-        i_crit = i_anodic[best_p] # Use raw or smooth? Smooth is safer.
-        idx_peak_global = np.where(E == E_pp)[0][0]
+        i_crit = i_anodic[best_p] 
 
-    # 4. Detect Passive Region & Breakdown (E_bd / "Erp")
+    # 4. Detect Passive Region & Breakdown (E_bd)
     E_bd = None
     i_pass_mean = None
     
@@ -121,39 +114,30 @@ if data_file is not None:
             i_min_val = i_post[min_idx_local]
             E_at_min = E_post[min_idx_local]
             
-            # Define Passive Region: area around the minimum
-            # Or simply define passive current as the minimum current found
             i_pass_mean = i_min_val
             
             # Detect Breakdown: Where current rises significantly above i_pass
-            # Heuristic: When current rises to 5x or 10x the passive current, or reaches 50% of i_crit again
-            # Let's use a threshold.
             threshold = i_min_val * 5 
-            # Find where it crosses this threshold AFTER the valley
             rise_mask = (i_post > threshold) & (E_post > E_at_min)
             if np.any(rise_mask):
                 E_bd = E_post[rise_mask][0]
             else:
-                # If it never rises, maybe the scan ended in the passive region
-                st.info("No breakdown/transpassive region detected (current remained low).")
+                st.info("No breakdown/transpassive region detected.")
 
-    # 5. Tafel Fit (Active Region Only)
-    # Fit between Ecorr and E_pp (with some buffer)
+    # 5. Tafel Fit (Linear part of Active Region)
     b_a = None
     if E_pp is not None:
-        # Take a slice between Ecorr + 50mV and E_pp - 50mV
+        # Fit between Ecorr + 20mV and E_pp - 50mV (adjustable buffers)
         tafel_mask = (E > (E_corr + 0.02)) & (E < (E_pp - 0.05))
     else:
-        # Standard Tafel: Ecorr + 50mV to Ecorr + 250mV
         tafel_mask = (E > (E_corr + 0.05)) & (E < (E_corr + 0.25))
         
     E_tafel = E[tafel_mask]
     i_tafel = np.abs(i_meas[tafel_mask])
     
     if len(E_tafel) > 5 and np.all(i_tafel > 0):
-        # Fit log(i) vs E
-        slope, intercept, r_val, _, _ = linregress(np.log10(i_tafel), E_tafel)
-        b_a = slope # slope is dE/dlogi = Beta
+        slope, intercept, _, _, _ = linregress(np.log10(i_tafel), E_tafel)
+        b_a = slope
         i_corr_fit = 10**((E_corr - intercept) / slope)
     else:
         i_corr_fit = np.nan
@@ -176,12 +160,9 @@ if data_file is not None:
         st.markdown("### 🔴 Passive/Transpassive")
         if i_pass_mean is not None:
             st.metric("i_pass (Min. Passive Current) (A/cm²)", f"{i_pass_mean:.2e}")
-        
         if E_bd is not None:
-            st.metric("E_bd (Breakdown/Transpassive) (V)", f"{E_bd:.3f}", help="Potential where current rises significantly after passivation. Often confused with Erp in LSV.")
-        else:
-            st.write("No breakdown detected.")
-            
+            st.metric("E_bd (Breakdown/Transpassive) (V)", f"{E_bd:.3f}")
+        
         if b_a is not None:
             st.write(f"**Anodic Tafel Slope (b_a):** {b_a*1000:.1f} mV/dec")
 
@@ -189,30 +170,32 @@ if data_file is not None:
     fig, ax = plt.subplots(figsize=(8, 6))
     
     # Plot raw data
-    ax.semilogy(E, np.abs(i_meas), 'k-', lw=1.5, label='Experimental Data', alpha=0.7)
+    ax.semilogy(E, np.abs(i_meas), 'k-', lw=1.5, label='Experimental Data', alpha=0.8)
     
     # Plot Ecorr
     ax.axvline(E_corr, color='gray', linestyle='--', alpha=0.5, label='E_corr')
     
-    # Highlight E_pp
+    # Highlight Regions
     if E_pp is not None:
-        ax.plot(E_pp, i_crit, 'ro', markersize=8, label=f'E_pp = {E_pp:.2f} V')
+        # --- NEW: Active Region Shading ---
+        ax.axvspan(E_corr, E_pp, color='red', alpha=0.1, label='Active Region')
+        
+        # Plot E_pp marker
+        ax.plot(E_pp, i_crit, 'ro', markersize=8)
         ax.axvline(E_pp, color='r', linestyle=':', alpha=0.5)
         
-    # Highlight E_bd
-    if E_bd is not None:
-        ax.axvline(E_bd, color='orange', linestyle='--', lw=2, label=f'Breakdown/Transpassive = {E_bd:.2f} V')
-        # Shade passive region
-        if E_pp is not None:
+        # Passive Region Shading
+        if E_bd is not None:
             ax.axvspan(E_pp, E_bd, color='green', alpha=0.1, label='Passive Region')
+            ax.axvline(E_bd, color='orange', linestyle='--', lw=2, label='Breakdown')
+        else:
+            # If no breakdown found, shade until end of scan
+            ax.axvspan(E_pp, E.max(), color='green', alpha=0.1, label='Passive Region')
 
     # Plot Tafel Fit line
     if b_a is not None and E_pp is not None:
-        # Extrapolate line for visual
+        # Visual extrapolation
         x_line = np.linspace(E_corr, E_pp, 100)
-        y_line = 10**((x_line - intercept) / slope) # Inverse of E = b*log(i) + a -> log(i) = (E-a)/b
-        # Wait, linregress was (logi, E). So E = slope*logi + intercept.
-        # logi = (E - intercept) / slope. i = 10^...
         y_line = 10**((x_line - intercept)/slope)
         ax.semilogy(x_line, y_line, 'b--', label=f'Tafel Fit ($b_a$={b_a*1000:.0f}mV)')
 
@@ -220,9 +203,6 @@ if data_file is not None:
     ax.set_ylabel("Current Density (|A|/cm²)")
     ax.set_title("Global Polarization Analysis")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(loc='lower right')
     
     st.pyplot(fig)
-
-    # Download Processed Data
-    st.download_button("Download Processed Data", data=df.to_csv(index=False), file_name="processed_data.csv")
