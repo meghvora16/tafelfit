@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 from scipy.signal import argrelextrema, savgol_filter
 from scipy.stats import linregress
 
-st.set_page_config(page_title="Automated Smart Tafel", layout="wide")
-st.title("Automated Smart Tafel Analysis")
+st.set_page_config(page_title="Tafel Analysis", layout="wide")
+st.title("Tafel Analysis")
 
 st.markdown("""
 **Status:** 🤖 **Auto-Pilot Engaged**
